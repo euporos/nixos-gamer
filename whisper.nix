@@ -22,7 +22,11 @@
 #   3. On the box:  echo 'HF_TOKEN=hf_...' > /var/lib/whisper/hf-token.env  (as root)
 
 let
-  image = "ghcr.io/jim60105/whisperx:large-v3-de";
+  # Pinned to the 2024-03-17 build (torch 2.1.1): current builds of this image
+  # use torch >= 2.8, whose CUDA wheels dropped Pascal (sm_61) kernels — they
+  # die with "no kernel image is available" on the 1080 Ti. Newest archived
+  # tag with a Pascal-capable torch:
+  image = "ghcr.io/jim60105/whisperx:large-v3-de-67924da";
 
   worker = pkgs.writeShellApplication {
     name = "whisper-worker";
