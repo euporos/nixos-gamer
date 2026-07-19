@@ -157,6 +157,10 @@ in
   };
   networking.firewall.allowedTCPPorts = [ 8990 ];
 
+  # The NixOS nginx unit runs with ProtectSystem=strict — writing PUT
+  # uploads into the inbox must be whitelisted explicitly.
+  systemd.services.nginx.serviceConfig.ReadWritePaths = [ "/srv/whisper/inbox" ];
+
   systemd.services.whisper-worker = {
     description = "Transcribe audio from /srv/whisper/inbox via WhisperX";
     after = [ "network-online.target" ];
