@@ -1,0 +1,7 @@
+# nix build symlinks
+/result
+/result-*
+
+# editor / scratch
+*~
+/.direnv/
