@@ -3,6 +3,8 @@
 {
   imports = [
     ./hardware-configuration.nix
+    ./nvidia.nix
+    ./whisper.nix
   ];
 
   # --- Boot -----------------------------------------------------------------

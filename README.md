@@ -4,14 +4,14 @@ Flake-based NixOS configuration for the host at **`phylax@192.168.85.30`**.
 
 Despite the name, this is not a gaming machine — the name comes from its Windows
 gaming dual-boot. This NixOS side is being set up as a **headless AI processing
-host**. Right now it only lays the groundwork (base system, SSH, deploy tooling);
-no AI/GPU stack is enabled yet.
+host**.
 
 ## Hardware
 
 - AMD Ryzen 5 1600X, UEFI, systemd-boot
-- NVIDIA GTX 1080 Ti (currently on the `nouveau` driver — no proprietary/CUDA
-  stack configured yet; that's the obvious next step for AI workloads)
+- NVIDIA GTX 1080 Ti on the proprietary `legacy_580` driver (the last branch
+  with Pascal support; `production` ≥ 590 dropped it), CUDA containers via
+  podman + nvidia-container-toolkit (CDI)
 - Root: `ext4` on `nvme0n1`; several extra SATA/HDD disks present but unmanaged here
 
 `hardware-configuration.nix` was captured from the live machine and carries the
@@ -24,7 +24,34 @@ on the box if the disk layout changes.
 | --------------------------- | ----------------------------------------------- |
 | `flake.nix`                 | inputs, `nixosConfigurations.nixos-gamer`, `deploy` app |
 | `configuration.nix`         | system config (users, SSH, locale, nix, packages) |
+| `nvidia.nix`                | proprietary NVIDIA driver (Pascal/`legacy_580`) + container toolkit |
+| `whisper.nix`               | German transcription pipeline (WhisperX + diarization) |
 | `hardware-configuration.nix`| generated hardware scan (real UUIDs)            |
+
+## Whisper transcription
+
+Async German speech-to-text with speaker diarization on the 1080 Ti
+(WhisperX large-v3, int8 — see `whisper.nix` for the full design).
+
+```sh
+# upload a recording (any common audio/video format)
+curl -T aufnahme.m4a http://192.168.85.30:8990/
+
+# ...the worker picks it up, transcribes, and drops results in
+#   /srv/whisper/transcripts/   (aufnahme.txt/.srt/.vtt/.json/.speakers.txt)
+curl http://192.168.85.30:8990/transcripts/            # listing
+curl -O http://192.168.85.30:8990/transcripts/aufnahme.speakers.txt
+```
+
+`scp` into `phylax@…:/srv/whisper/inbox/` works too. Processed audio moves to
+`/srv/whisper/processed/`, failures to `/srv/whisper/failed/` (worker logs:
+`journalctl -u whisper-worker`). Same-named uploads overwrite older transcripts.
+
+**Speaker diarization** needs a Hugging Face token (gated pyannote models);
+without it the worker transcribes without speaker labels. One-time setup:
+accept the terms of `pyannote/speaker-diarization-3.1` **and**
+`pyannote/segmentation-3.0` on huggingface.co, create a read token, then on
+the box as root: `echo 'HF_TOKEN=hf_...' > /var/lib/whisper/hf-token.env`.
 
 ## Deploy
 
