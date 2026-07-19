@@ -5,3 +5,4 @@
 # editor / scratch
 *~
 /.direnv/
+.playwright-mcp/
