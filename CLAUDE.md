@@ -32,6 +32,14 @@ box. Never build locally for the box; its internet is faster.
 
 ## Whisper transcription pipeline (`whisper.nix`)
 
+- Web UI: `http://192.168.85.30:8990/` — single static page
+  (`whisper-ui/index.html`, no build step, no backend daemon). It polls nginx
+  `autoindex_format json` listings under `/status/{inbox,work,failed,transcripts}/`
+  to show all jobs (including CLI/scp uploads), and cancels/requeues by
+  PUTting `<name>.cancel` / `<name>.requeue` sentinels to `/control/`, handled
+  by the `whisper-control` path unit (kills the `whisper-job` podman
+  container, or moves files between inbox/ and failed/). A cancelled job's
+  audio lands in `failed/` like any failure.
 - Upload: `curl -T file.m4a http://192.168.85.30:8990/` (nginx WebDAV PUT,
   atomic rename into `/srv/whisper/inbox`), or scp into that dir.
 - systemd path unit + 10-min sweep timer → `whisper-worker` (bash, runs as

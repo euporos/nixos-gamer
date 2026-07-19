@@ -2,9 +2,16 @@
 
 # German speech-to-text pipeline with speaker diarization.
 #
+#   web UI:      http://192.168.85.30:8990/  (upload, live job status, cancel,
+#                requeue, transcript browser — static page, no backend daemon)
 #   upload:      curl -T aufnahme.m4a http://192.168.85.30:8990/
 #                (or: scp aufnahme.m4a phylax@192.168.85.30:/srv/whisper/inbox/)
 #   transcripts: /srv/whisper/transcripts/  (also http://192.168.85.30:8990/transcripts/)
+#
+# The UI has no state of its own: it polls nginx autoindex-JSON listings of
+# inbox/work/failed/transcripts (so jobs started via curl/scp show up too) and
+# requests cancel/requeue by PUTting "<name>.cancel"/"<name>.requeue" sentinel
+# files into /srv/whisper/control, which the whisper-control path unit acts on.
 #
 # nginx PUTs uploads atomically into /srv/whisper/inbox; a systemd path unit
 # fires the worker, which runs WhisperX (faster-whisper large-v3, German
@@ -99,7 +106,12 @@ let
           echo "note: no HF token in $TOKEN_FILE — transcribing WITHOUT speaker diarization"
         fi
 
-        if timeout 6h podman run --rm \
+        # Fixed container name: the worker is strictly serial, so only one job
+        # container ever exists. whisper-control kills it by name to cancel;
+        # the label lets it verify which file the container is working on.
+        # --replace clears a leftover container after an unclean shutdown.
+        if timeout 6h podman run --rm --replace \
+            --name whisper-job --label "file=$name" \
             --device nvidia.com/gpu=all \
             -v "$job:/app" \
             -v /var/cache/whisperx:/.cache \
@@ -124,6 +136,68 @@ let
       done
     '';
   };
+
+  # Acts on sentinel files the web UI PUTs into /srv/whisper/control:
+  #   <name>.cancel   kill the job for <name> — queued (mv inbox -> failed)
+  #                   or already running (podman kill the job container)
+  #   <name>.requeue  move failed/<name> back into the inbox
+  # Sentinels are always consumed, even when nothing matches — a path unit on
+  # DirectoryNotEmpty would otherwise re-trigger forever.
+  control = pkgs.writeShellApplication {
+    name = "whisper-control";
+    runtimeInputs = [ pkgs.podman pkgs.coreutils ];
+    text = ''
+      INBOX=/srv/whisper/inbox
+      FAILED=/srv/whisper/failed
+      CONTROL=/srv/whisper/control
+
+      current_job() {
+        podman inspect whisper-job \
+          --format '{{ index .Config.Labels "file" }}' 2>/dev/null || true
+      }
+
+      shopt -s nullglob
+      for s in "$CONTROL"/*.cancel; do
+        name=$(basename "''${s%.cancel}")
+        rm -f "$s"
+        echo "cancel requested: $name"
+        # If the worker snatches the file between test and mv, fall through
+        # to the container poll instead of failing.
+        if [ -f "$INBOX/$name" ] && mv "$INBOX/$name" "$FAILED/$name" 2>/dev/null; then
+          echo "cancel: $name was still queued -> moved to failed/"
+          continue
+        fi
+        # The worker may be between picking the file up and starting the
+        # container — poll briefly for the container to appear before giving up.
+        for _ in $(seq 1 10); do
+          if [ "$(current_job)" = "$name" ]; then
+            echo "cancel: killing container for $name"
+            podman kill whisper-job || true
+            break
+          fi
+          sleep 2
+        done
+      done
+
+      for s in "$CONTROL"/*.requeue; do
+        name=$(basename "''${s%.requeue}")
+        rm -f "$s"
+        if [ -f "$FAILED/$name" ] && mv "$FAILED/$name" "$INBOX/$name" 2>/dev/null; then
+          echo "requeue: $name -> inbox"
+        fi
+      done
+    '';
+  };
+
+  # Read-only JSON directory listing for the UI's status polling.
+  statusListing = dir: {
+    alias = dir;
+    extraConfig = ''
+      autoindex on;
+      autoindex_format json;
+      add_header Cache-Control "no-cache";
+    '';
+  };
 in
 {
   virtualisation.podman.enable = true;
@@ -145,6 +219,7 @@ in
     "d /srv/whisper/transcripts 2775 whisper whisper -"
     "d /srv/whisper/processed 2770 whisper whisper -"
     "d /srv/whisper/failed 2770 whisper whisper -"
+    "d /srv/whisper/control 2770 whisper whisper -"
     "d /var/cache/whisperx 0770 whisper whisper -"
     "d /var/lib/whisper 0750 root whisper -"
   ];
@@ -155,6 +230,15 @@ in
     clientMaxBodySize = "4096m";
     virtualHosts."whisper" = {
       listen = [ { addr = "0.0.0.0"; port = 8990; } ];
+      # The web UI — one self-contained page. Exact-match only, so PUT
+      # uploads to /<name> still hit the inbox location below.
+      locations."= /" = {
+        alias = "${./whisper-ui/index.html}";
+        extraConfig = ''
+          default_type text/html;
+          add_header Cache-Control "no-cache";
+        '';
+      };
       # PUT /<name> lands atomically in the inbox (nginx writes to a temp
       # file and renames — the worker never sees partial uploads).
       locations."/" = {
@@ -165,6 +249,22 @@ in
           limit_except PUT { deny all; }
         '';
       };
+      # Cancel/requeue channel: the UI PUTs empty <name>.cancel / <name>.requeue
+      # sentinels here; the whisper-control path unit reacts to them.
+      locations."/control/" = {
+        root = "/srv/whisper";
+        extraConfig = ''
+          dav_methods PUT;
+          create_full_put_path off;
+          limit_except PUT { deny all; }
+        '';
+      };
+      # JSON listings the UI polls to derive job state — covers jobs started
+      # from the CLI too, since they are just files in these directories.
+      locations."/status/inbox/" = statusListing "/srv/whisper/inbox/";
+      locations."/status/work/" = statusListing "/srv/whisper/work/";
+      locations."/status/failed/" = statusListing "/srv/whisper/failed/";
+      locations."/status/transcripts/" = statusListing "/srv/whisper/transcripts/";
       locations."/transcripts/" = {
         alias = "/srv/whisper/transcripts/";
         extraConfig = ''
@@ -177,8 +277,11 @@ in
   networking.firewall.allowedTCPPorts = [ 8990 ];
 
   # The NixOS nginx unit runs with ProtectSystem=strict — writing PUT
-  # uploads into the inbox must be whitelisted explicitly.
-  systemd.services.nginx.serviceConfig.ReadWritePaths = [ "/srv/whisper/inbox" ];
+  # uploads into the inbox/control dirs must be whitelisted explicitly.
+  systemd.services.nginx.serviceConfig.ReadWritePaths = [
+    "/srv/whisper/inbox"
+    "/srv/whisper/control"
+  ];
 
   systemd.services.whisper-worker = {
     description = "Transcribe audio from /srv/whisper/inbox via WhisperX";
@@ -195,6 +298,22 @@ in
     description = "Watch the whisper inbox for new uploads";
     wantedBy = [ "multi-user.target" ];
     pathConfig.DirectoryNotEmpty = "/srv/whisper/inbox";
+  };
+
+  systemd.services.whisper-control = {
+    description = "Apply cancel/requeue sentinels from /srv/whisper/control";
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = lib.getExe control;
+      # cancel may poll up to ~20s for the job container to appear
+      TimeoutStartSec = "5min";
+    };
+  };
+
+  systemd.paths.whisper-control = {
+    description = "Watch the whisper control dir for cancel/requeue sentinels";
+    wantedBy = [ "multi-user.target" ];
+    pathConfig.DirectoryNotEmpty = "/srv/whisper/control";
   };
 
   # Sweeper for anything the path unit misses (files landing mid-run,

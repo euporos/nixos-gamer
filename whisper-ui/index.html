@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>whisper · nixos-gamer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23131109' stroke='%23f0a72e' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23f0a72e'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:      #131109;
+    --panel:   #1b1811;
+    --panel2:  #211d13;
+    --line:    #322c1d;
+    --ink:     #ece4cf;
+    --dim:     #8f8672;
+    --faint:   #5b543f;
+    --amber:   #f0a72e;
+    --amber-hi:#ffc558;
+    --green:   #97e08a;
+    --red:     #ff6b52;
+    --mono: "Iosevka","Iosevka Term","JetBrains Mono","Cascadia Code","Fira Code",
+            ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{color-scheme:dark}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--mono);
+    font-size:14px;
+    line-height:1.5;
+    min-height:100vh;
+    background-image:
+      radial-gradient(120% 90% at 50% -10%, #241f10 0%, transparent 60%),
+      repeating-linear-gradient(0deg, transparent 0 3px, rgba(0,0,0,.22) 3px 4px);
+  }
+  body::after{ /* film grain */
+    content:"";position:fixed;inset:0;pointer-events:none;opacity:.05;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  main,header,footer{max-width:880px;margin:0 auto;padding:0 20px}
+
+  /* ---------- header ---------- */
+  header{padding-top:34px;padding-bottom:8px}
+  .brand{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  .rec{
+    width:13px;height:13px;border-radius:50%;
+    background:var(--faint);
+    box-shadow:0 0 0 3px rgba(240,167,46,0);
+    align-self:center;flex:none;transition:background .4s;
+  }
+  .rec.live{background:var(--amber);animation:blink 1.4s steps(2,jump-none) infinite}
+  @keyframes blink{50%{background:#6b4d15;box-shadow:0 0 12px rgba(240,167,46,.5)}}
+  h1{
+    font-size:30px;font-weight:700;letter-spacing:.28em;text-transform:uppercase;
+  }
+  h1 .host{color:var(--faint);font-weight:400;letter-spacing:.1em;font-size:16px;margin-left:6px}
+  .tagline{color:var(--dim);font-size:12px;letter-spacing:.08em;margin-top:2px}
+  .offline{
+    display:none;color:var(--red);border:1px solid var(--red);
+    font-size:11px;letter-spacing:.15em;padding:1px 8px;margin-left:auto;align-self:center;
+  }
+  body.offline .offline{display:inline-block}
+
+  /* ---------- dropzone ---------- */
+  #dropzone{
+    margin-top:26px;
+    border:1px dashed var(--faint);
+    background:linear-gradient(180deg, rgba(240,167,46,.03), transparent);
+    padding:34px 20px;text-align:center;cursor:pointer;outline:none;
+    transition:border-color .15s, background .15s;
+  }
+  #dropzone:hover,#dropzone:focus-visible,#dropzone.drag{
+    border-color:var(--amber);
+    background:linear-gradient(180deg, rgba(240,167,46,.08), transparent);
+  }
+  #dropzone .glyph{
+    font-size:34px;color:var(--amber);line-height:1;
+    text-shadow:0 0 18px rgba(240,167,46,.4);
+  }
+  #dropzone .label{margin-top:10px;letter-spacing:.12em;text-transform:uppercase;font-size:13px}
+  #dropzone .label span{color:var(--dim);text-transform:none;letter-spacing:0}
+  #dropzone .hint{margin-top:4px;color:var(--faint);font-size:11px;letter-spacing:.2em}
+
+  /* ---------- sections ---------- */
+  h2{
+    margin:38px 0 10px;font-size:12px;font-weight:700;color:var(--dim);
+    letter-spacing:.3em;text-transform:uppercase;
+    display:flex;align-items:center;gap:12px;
+  }
+  h2::after{content:"";flex:1;height:1px;background:var(--line)}
+  .empty{color:var(--faint);font-size:12px;padding:10px 2px;letter-spacing:.05em}
+
+  /* ---------- job cards ---------- */
+  .job{
+    background:var(--panel);border:1px solid var(--line);
+    border-left:3px solid var(--faint);
+    padding:12px 14px;margin-bottom:10px;
+  }
+  .job.transcribing{border-left-color:var(--amber)}
+  .job.queued,.job.uploading{border-left-color:var(--dim)}
+  .job.failed,.job.upload-error{border-left-color:var(--red)}
+  .job.cancelled{border-left-color:var(--faint)}
+  .job .row{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+  .job .name{font-weight:700;word-break:break-all}
+  .badge{
+    font-size:10px;letter-spacing:.2em;text-transform:uppercase;
+    padding:1px 8px;border:1px solid currentColor;flex:none;
+  }
+  .badge.transcribing{color:var(--amber)}
+  .badge.queued,.badge.uploading{color:var(--dim)}
+  .badge.failed,.badge.upload-error{color:var(--red)}
+  .badge.cancelled{color:var(--faint)}
+  .job .meta{color:var(--dim);font-size:12px}
+  .job .elapsed{color:var(--amber-hi);font-variant-numeric:tabular-nums}
+  .job .spacer{flex:1}
+  .job .actions{display:flex;gap:8px}
+  button{
+    font-family:inherit;font-size:11px;letter-spacing:.15em;text-transform:uppercase;
+    background:none;border:1px solid var(--line);color:var(--dim);
+    padding:3px 10px;cursor:pointer;transition:all .12s;
+  }
+  button:hover{border-color:var(--red);color:var(--red)}
+  button.requeue:hover,button.preview-btn:hover{border-color:var(--amber);color:var(--amber-hi)}
+  /* segmented VU bar */
+  .bar{
+    margin-top:10px;height:9px;
+    background:repeating-linear-gradient(90deg, var(--panel2) 0 6px, transparent 6px 8px);
+    overflow:hidden;
+  }
+  .bar i{
+    display:block;height:100%;width:0%;
+    background:repeating-linear-gradient(90deg, var(--amber) 0 6px, transparent 6px 8px);
+    transition:width 1s linear;
+  }
+  .bar.indet i{
+    width:30%;
+    background:repeating-linear-gradient(90deg, #7a5a1c 0 6px, transparent 6px 8px);
+    animation:sweep 2.4s ease-in-out infinite alternate;
+  }
+  @keyframes sweep{from{margin-left:0}to{margin-left:70%}}
+
+  /* ---------- archive ---------- */
+  .rec-item{
+    border-bottom:1px solid var(--line);
+    padding:10px 2px;
+  }
+  .rec-item.fresh{border-left:3px solid var(--green);padding-left:11px;margin-left:-14px;
+    background:linear-gradient(90deg, rgba(151,224,138,.05), transparent)}
+  .rec-item .row{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+  .rec-item .stem{font-weight:700;word-break:break-all}
+  .rec-item .when{color:var(--faint);font-size:11px;font-variant-numeric:tabular-nums}
+  .rec-item .spacer{flex:1}
+  .exts{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
+  .exts a{
+    color:var(--dim);text-decoration:none;font-size:11px;letter-spacing:.1em;
+    border:1px solid var(--line);padding:1px 7px;
+  }
+  .exts a:hover{color:var(--amber-hi);border-color:var(--amber)}
+  pre.preview{
+    margin-top:10px;padding:12px;background:var(--panel);border:1px solid var(--line);
+    white-space:pre-wrap;word-break:break-word;max-height:340px;overflow:auto;
+    font-size:12px;color:var(--ink);
+  }
+  pre.preview .spk{color:var(--amber-hi)}
+
+  footer{
+    margin-top:56px;padding-bottom:40px;color:var(--faint);font-size:11px;
+    letter-spacing:.05em;
+  }
+  footer code{color:var(--dim)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="rec" id="rec"></div>
+    <h1>Whisper<span class="host">@nixos-gamer</span></h1>
+    <span class="offline">offline</span>
+  </div>
+  <div class="tagline">german speech → text · whisperx large-v3 · int8 on GTX 1080 Ti · ~15× realtime</div>
+</header>
+
+<main>
+  <div id="dropzone" tabindex="0" role="button" aria-label="upload audio">
+    <input type="file" id="filepick" multiple hidden>
+    <div class="glyph">⏺</div>
+    <div class="label">drop audio to transcribe <span>— or click to choose</span></div>
+    <div class="hint">m4a · mp3 · wav · ogg · opus · mp4 · mkv</div>
+  </div>
+
+  <h2>Jobs</h2>
+  <div id="jobs"><div class="empty">nothing queued, nothing running</div></div>
+
+  <h2>Transcripts</h2>
+  <div id="archive"><div class="empty">loading…</div></div>
+</main>
+
+<footer>
+  cli upload works too: <code id="curlhint"></code><br>
+  cancelled &amp; failed audio lands in <code>failed/</code> — requeue re-runs it
+</footer>
+
+<script>
+'use strict';
+
+const POLL_MS = 4000;
+const TRANSCRIPT_EXTS = ['speakers.txt','json','srt','tsv','txt','vtt'];
+const EXT_ORDER = ['speakers.txt','txt','srt','vtt','tsv','json'];
+// seconds of fixed overhead (container start + model load) added to the ETA
+const ETA_OVERHEAD_S = 90, RT_FACTOR = 15;
+
+document.getElementById('curlhint').textContent =
+  'curl -T aufnahme.m4a http://' + location.host + '/';
+
+/* ---------- state ---------- */
+// per-file client-side extras, survives reloads
+const meta = JSON.parse(localStorage.getItem('whisperui') || '{}');
+const saveMeta = () => localStorage.setItem('whisperui', JSON.stringify(meta));
+const uploads = {};            // name -> {pct, error}
+let server = {inbox:[], working:[], failed:[], transcripts:[], ok:false};
+const expanded = new Set();    // stems with open preview
+const previews = {};           // stem -> {text} | {error} | {loading:true}
+
+/* ---------- helpers ---------- */
+const $ = sel => document.querySelector(sel);
+const esc = s => String(s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const isTranscript = n => TRANSCRIPT_EXTS.some(x => n.endsWith('.' + x));
+const transcriptStem = n => {
+  const ext = TRANSCRIPT_EXTS.find(x => n.endsWith('.' + x));
+  return ext ? n.slice(0, -(ext.length + 1)) : null;
+};
+const fmtSize = b => b >= 1048576 ? (b/1048576).toFixed(1)+' MB'
+                   : b >= 1024    ? (b/1024).toFixed(0)+' KB' : b+' B';
+const fmtElapsed = ms => {
+  const s = Math.max(0, Math.floor(ms/1000));
+  const h = Math.floor(s/3600), m = Math.floor(s%3600/60), r = s%60;
+  const p = n => String(n).padStart(2,'0');
+  return (h ? h+':'+p(m) : m) + ':' + p(r);
+};
+const fmtWhen = ms => {
+  const d = new Date(ms), p = n => String(n).padStart(2,'0');
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());
+};
+
+async function jfetch(url){
+  const r = await fetch(url, {cache:'no-store'});
+  if(!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+/* ---------- polling ---------- */
+async function poll(){
+  try{
+    const [inbox, work, failed, transcripts] = await Promise.all([
+      jfetch('/status/inbox/'), jfetch('/status/work/'),
+      jfetch('/status/failed/'), jfetch('/status/transcripts/'),
+    ]);
+    // each work/job.* dir holds the audio being transcribed (plus, late in the
+    // run, its finished outputs) — the audio is the one non-transcript file
+    const working = [];
+    for(const d of work.filter(e => e.type === 'directory')){
+      try{
+        const files = await jfetch('/status/work/' + encodeURIComponent(d.name) + '/');
+        const audio = files.find(f => f.type === 'file' && !isTranscript(f.name));
+        if(audio) working.push({name: audio.name, since: Date.parse(d.mtime)});
+      }catch(e){ /* job dir vanished or not yet readable — next poll */ }
+    }
+    server = {inbox, working, failed, transcripts, ok:true};
+    // an upload the server now knows about is no longer "uploading"
+    for(const n of Object.keys(uploads)){
+      if(!uploads[n].error &&
+         (inbox.some(f => f.name === n) || working.some(w => w.name === n)))
+        delete uploads[n];
+    }
+  }catch(e){
+    server.ok = false;
+  }
+  document.body.classList.toggle('offline', !server.ok);
+  render();
+}
+
+/* ---------- job model ---------- */
+function jobList(){
+  const jobs = new Map();
+  for(const [name, u] of Object.entries(uploads))
+    jobs.set(name, {name, state: u.error ? 'upload-error' : 'uploading', pct: u.pct, error: u.error});
+  for(const f of server.inbox.filter(e => e.type === 'file'))
+    jobs.set(f.name, {name: f.name, state: 'queued', size: f.size});
+  for(const w of server.working)
+    jobs.set(w.name, {name: w.name, state: 'transcribing', since: w.since});
+  for(const f of server.failed.filter(e => e.type === 'file'))
+    jobs.set(f.name, {name: f.name,
+      state: meta[f.name] && meta[f.name].cancelled ? 'cancelled' : 'failed',
+      mtime: Date.parse(f.mtime)});
+  return [...jobs.values()];
+}
+
+function archiveGroups(){
+  const g = {};
+  for(const f of server.transcripts.filter(e => e.type === 'file')){
+    const stem = transcriptStem(f.name);
+    if(stem === null) continue;
+    const ext = f.name.slice(stem.length + 1);
+    (g[stem] || (g[stem] = {stem, exts:[], mtime:0}));
+    g[stem].exts.push(ext);
+    g[stem].mtime = Math.max(g[stem].mtime, Date.parse(f.mtime));
+  }
+  for(const v of Object.values(g))
+    v.exts.sort((a,b) => EXT_ORDER.indexOf(a) - EXT_ORDER.indexOf(b));
+  return Object.values(g).sort((a,b) => b.mtime - a.mtime);
+}
+
+/* ---------- rendering ---------- */
+function render(){
+  const jobs = jobList();
+  $('#rec').classList.toggle('live', jobs.some(j => j.state === 'transcribing'));
+
+  $('#jobs').innerHTML = jobs.length ? jobs.map(job => {
+    const dur = meta[job.name] && meta[job.name].duration;
+    let bar = '', metaHtml = '', actions = '';
+    if(job.state === 'uploading'){
+      metaHtml = `<span class="meta">${job.pct.toFixed(0)}%</span>`;
+      bar = `<div class="bar"><i style="width:${job.pct}%"></i></div>`;
+    }else if(job.state === 'upload-error'){
+      metaHtml = `<span class="meta">${esc(job.error)}</span>`;
+    }else if(job.state === 'queued'){
+      metaHtml = `<span class="meta">${fmtSize(job.size)} · waiting for worker</span>`;
+      actions = `<button data-action="cancel" data-name="${esc(job.name)}">cancel</button>`;
+    }else if(job.state === 'transcribing'){
+      const eta = dur ? (ETA_OVERHEAD_S + dur / RT_FACTOR) * 1000 : 0;
+      metaHtml = `<span class="elapsed" data-since="${job.since}">${fmtElapsed(Date.now() - job.since)}</span>` +
+                 (eta ? `<span class="meta"> / ~${fmtElapsed(eta)}</span>` : '');
+      bar = eta
+        ? `<div class="bar"><i data-since="${job.since}" data-eta="${eta}"></i></div>`
+        : `<div class="bar indet"><i></i></div>`;
+      actions = `<button data-action="cancel" data-name="${esc(job.name)}">kill</button>`;
+    }else{ // failed | cancelled
+      metaHtml = `<span class="meta">${fmtWhen(job.mtime)}</span>`;
+      actions = `<button class="requeue" data-action="requeue" data-name="${esc(job.name)}">requeue</button>`;
+    }
+    return `<div class="job ${job.state}">
+      <div class="row">
+        <span class="badge ${job.state}">${job.state.replace('-',' ')}</span>
+        <span class="name">${esc(job.name)}</span>
+        ${metaHtml}
+        <span class="spacer"></span>
+        <div class="actions">${actions}</div>
+      </div>${bar}
+    </div>`;
+  }).join('') : '<div class="empty">nothing queued, nothing running</div>';
+
+  const groups = archiveGroups();
+  $('#archive').innerHTML = groups.length ? groups.map(g => {
+    const fresh = Date.now() - g.mtime < 10 * 60 * 1000;
+    const links = g.exts.map(ext =>
+      `<a href="/transcripts/${encodeURIComponent(g.stem + '.' + ext)}" download>.${ext}</a>`).join('');
+    const p = previews[g.stem];
+    const body = !expanded.has(g.stem) ? ''
+      : p && p.text  ? `<pre class="preview">${highlightSpeakers(p.text)}</pre>`
+      : p && p.error ? `<pre class="preview">could not load preview: ${esc(p.error)}</pre>`
+      : `<pre class="preview">loading…</pre>`;
+    return `<div class="rec-item${fresh ? ' fresh' : ''}">
+      <div class="row">
+        <span class="stem">${esc(g.stem)}</span>
+        <span class="when">${fmtWhen(g.mtime)}</span>
+        <span class="spacer"></span>
+        <button class="preview-btn" data-action="toggle" data-name="${esc(g.stem)}">
+          ${expanded.has(g.stem) ? 'hide' : 'view'}</button>
+      </div>
+      <div class="exts">${links}</div>
+      ${body}
+    </div>`;
+  }).join('') : (server.ok
+      ? '<div class="empty">no transcripts yet</div>'
+      : '<div class="empty">server unreachable</div>');
+
+  tick();
+}
+
+const highlightSpeakers = text =>
+  esc(text).replace(/(SPEAKER_\S+|\bSPEAKER\b)/g, '<span class="spk">$1</span>');
+
+// update elapsed counters + ETA bars in place, once a second
+function tick(){
+  const now = Date.now();
+  document.querySelectorAll('.elapsed[data-since]').forEach(el =>
+    el.textContent = fmtElapsed(now - Number(el.dataset.since)));
+  document.querySelectorAll('.bar i[data-eta]').forEach(el => {
+    const pct = (now - Number(el.dataset.since)) / Number(el.dataset.eta) * 100;
+    el.style.width = Math.min(98, Math.max(2, pct)) + '%';
+  });
+}
+
+/* ---------- actions ---------- */
+document.addEventListener('click', async ev => {
+  const btn = ev.target.closest('button[data-action]');
+  if(!btn) return;
+  const {action, name} = btn.dataset;
+  if(action === 'cancel'){
+    btn.disabled = true;
+    (meta[name] || (meta[name] = {})).cancelled = Date.now(); saveMeta();
+    try{ await control(name, 'cancel'); }catch(e){}
+    setTimeout(poll, 1500);
+  }else if(action === 'requeue'){
+    btn.disabled = true;
+    if(meta[name]) { delete meta[name].cancelled; saveMeta(); }
+    try{ await control(name, 'requeue'); }catch(e){}
+    setTimeout(poll, 1500);
+  }else if(action === 'toggle'){
+    if(expanded.has(name)){ expanded.delete(name); }
+    else{
+      expanded.add(name);
+      if(!previews[name]) loadPreview(name);
+    }
+    render();
+  }
+});
+
+const control = (name, verb) =>
+  fetch('/control/' + encodeURIComponent(name + '.' + verb), {method:'PUT', body:''});
+
+async function loadPreview(stem){
+  previews[stem] = {loading:true};
+  for(const ext of ['speakers.txt', 'txt']){
+    try{
+      const r = await fetch('/transcripts/' + encodeURIComponent(stem + '.' + ext), {cache:'no-store'});
+      if(r.ok){ previews[stem] = {text: await r.text()}; render(); return; }
+    }catch(e){}
+  }
+  previews[stem] = {error: 'no .speakers.txt / .txt found'};
+  render();
+}
+
+/* ---------- upload ---------- */
+function uploadFile(file){
+  const name = file.name;
+  uploads[name] = {pct: 0};
+  // probe the audio duration client-side so the ETA bar has something to aim at
+  const url = URL.createObjectURL(file);
+  const probe = document.createElement('audio');
+  probe.preload = 'metadata';
+  probe.onloadedmetadata = () => {
+    if(isFinite(probe.duration) && probe.duration > 0){
+      (meta[name] || (meta[name] = {})).duration = probe.duration;
+      delete meta[name].cancelled;
+      saveMeta();
+    }
+    URL.revokeObjectURL(url);
+  };
+  probe.onerror = () => URL.revokeObjectURL(url);
+  probe.src = url;
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('PUT', '/' + encodeURIComponent(name));
+  xhr.upload.onprogress = e => {
+    if(e.lengthComputable){ uploads[name].pct = e.loaded / e.total * 100; render(); }
+  };
+  xhr.onload = () => {
+    if(xhr.status >= 200 && xhr.status < 300){ uploads[name].pct = 100; poll(); }
+    else{ uploads[name].error = 'upload failed (HTTP ' + xhr.status + ')'; render(); }
+  };
+  xhr.onerror = () => { uploads[name].error = 'upload failed (network)'; render(); };
+  xhr.send(file);
+  render();
+}
+
+const dz = $('#dropzone'), fp = $('#filepick');
+dz.addEventListener('click', () => fp.click());
+dz.addEventListener('keydown', e => {
+  if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); fp.click(); }
+});
+fp.addEventListener('change', () => { [...fp.files].forEach(uploadFile); fp.value = ''; });
+['dragenter','dragover'].forEach(t => dz.addEventListener(t, e => {
+  e.preventDefault(); dz.classList.add('drag');
+}));
+['dragleave','drop'].forEach(t => dz.addEventListener(t, e => {
+  e.preventDefault(); dz.classList.remove('drag');
+}));
+dz.addEventListener('drop', e => [...e.dataTransfer.files].forEach(uploadFile));
+// don't let a stray drop outside the zone navigate away from the page
+['dragover','drop'].forEach(t => document.addEventListener(t, e => e.preventDefault()));
+
+/* ---------- go ---------- */
+// prune client-side metadata for files the server no longer knows anywhere
+function pruneMeta(){
+  if(!server.ok) return;
+  const known = new Set([
+    ...server.inbox.map(f => f.name), ...server.working.map(w => w.name),
+    ...server.failed.map(f => f.name), ...Object.keys(uploads),
+  ]);
+  let dirty = false;
+  for(const n of Object.keys(meta))
+    if(!known.has(n)){ delete meta[n]; dirty = true; }
+  if(dirty) saveMeta();
+}
+setInterval(tick, 1000);
+setInterval(() => { poll().then(pruneMeta); }, POLL_MS);
+poll().then(pruneMeta);
+</script>
+</body>
+</html>
