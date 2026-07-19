@@ -12,8 +12,11 @@
 
       host = "root@192.168.85.30";
 
-      # Push the current branch to origin, then build locally and activate the
-      # closure on the target over SSH (no GitHub round-trip on the box).
+      # Push the current branch to origin, then rebuild nixos-gamer over SSH.
+      # Evaluation happens locally (cheap); the actual building + substituting
+      # from binary caches happens ON the target (--build-host == --target-host),
+      # which has the stronger internet connection. Nothing is copied between
+      # this machine and the box beyond the derivations.
       #   nix run .#deploy
       deploy = pkgs.writeShellApplication {
         name = "deploy";
@@ -24,9 +27,10 @@
           echo "Pushing $branch to origin…"
           git push origin "HEAD:$branch"
 
-          echo "Rebuilding nixos-gamer (${host})…"
+          echo "Rebuilding nixos-gamer on ${host}…"
           nixos-rebuild switch \
             --flake ".#nixos-gamer" \
+            --build-host "${host}" \
             --target-host "${host}" \
             --use-substitutes
 

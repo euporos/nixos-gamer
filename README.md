@@ -32,8 +32,10 @@ on the box if the disk layout changes.
 nix run .#deploy
 ```
 
-This pushes the current branch to `origin`, then builds locally and activates the
-closure on the target over SSH (`nixos-rebuild switch --target-host root@192.168.85.30`).
+This pushes the current branch to `origin`, then rebuilds over SSH. Evaluation
+runs on your local machine (cheap), but the actual building and cache downloads
+happen **on the target** (`--build-host == --target-host`), so the box's stronger
+internet does the heavy lifting and nothing but derivations crosses the network.
 
 ### One-time bootstrap
 
