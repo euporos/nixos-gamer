@@ -231,11 +231,13 @@ in
     virtualHosts."whisper" = {
       listen = [ { addr = "0.0.0.0"; port = 8990; } ];
       # The web UI — one self-contained page. Exact-match only, so PUT
-      # uploads to /<name> still hit the inbox location below.
+      # uploads to /<name> still hit the inbox location below. try_files
+      # (not alias-to-file or index) because it serves within this location:
+      # an index internal-redirect would re-match into the PUT-only location.
       locations."= /" = {
-        alias = "${./whisper-ui/index.html}";
+        root = "${./whisper-ui}";
+        tryFiles = "/index.html =404";
         extraConfig = ''
-          default_type text/html;
           add_header Cache-Control "no-cache";
         '';
       };
