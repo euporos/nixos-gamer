@@ -1,0 +1,61 @@
+# nixos-gamer
+
+Flake-based NixOS config for the headless AI host at `192.168.85.30`
+(hostname `nixos-gamer`, user `phylax`, root SSH works). Despite the name it is
+not for gaming — the name comes from the Windows dual-boot on the same machine.
+
+## Deploy
+
+```sh
+nix run .#deploy
+```
+
+Pushes the current branch to origin, then `nixos-rebuild switch` over SSH with
+`--build-host == --target-host` — evaluation is local, building happens on the
+box. Never build locally for the box; its internet is faster.
+
+## Hardware constraints (violating these breaks the box)
+
+- **GPU is a GTX 1080 Ti (Pascal, sm_61).** Consequences:
+  - NVIDIA driver must stay on `nvidiaPackages.legacy_580` — the last branch
+    with Pascal support (`production` ≥ 590 dropped it). See `nvidia.nix`.
+  - PyTorch ≥ 2.8 CUDA wheels have **no sm_61 kernels** — anything torch-based
+    must use torch ≤ 2.7.x or it dies with "no kernel image is available".
+    This is why the WhisperX container image in `whisper.nix` is pinned to a
+    2024 build (torch 2.1.1). Do not bump it to a floating tag.
+  - No usable fp16 on Pascal; CTranslate2/faster-whisper runs `int8` (dp4a).
+- **The ESP (`/boot`) is a tiny 96MB Windows-created partition** shared with
+  the Microsoft bootloader (~25MB). Kernel ≈ 13MB, initrd ≈ 20MB (xz).
+  `configurationLimit = 2` + `boot.initrd.compressor = "xz"` exist to make two
+  generations fit — a third does not. If a switch fails with ENOSPC on /boot:
+  delete old system generations and stale `*.tmp` files in `/boot/EFI/nixos/`.
+
+## Whisper transcription pipeline (`whisper.nix`)
+
+- Upload: `curl -T file.m4a http://192.168.85.30:8990/` (nginx WebDAV PUT,
+  atomic rename into `/srv/whisper/inbox`), or scp into that dir.
+- systemd path unit + 10-min sweep timer → `whisper-worker` (bash, runs as
+  root) → one-shot rootful podman job per file with `--device
+  nvidia.com/gpu=all` (CDI). No VRAM held between jobs; ~15× realtime.
+- Results in `/srv/whisper/transcripts/` (`.txt/.srt/.vtt/.tsv/.json` +
+  jq-generated `.speakers.txt`); audio → `processed/`, failures → `failed/`
+  (requeue = move back to inbox). Logs: `journalctl -u whisper-worker`.
+- The container user is uid 1001 == host user `whisper` (fixed uid, on
+  purpose — bind-mounted job dirs rely on it).
+- The image's whisperx downloads its VAD model from a **dead S3 bucket**; the
+  worker pre-seeds the sha-verified file into `/var/cache/whisperx/torch/`
+  from the whisperX repo's bundled asset. Keep that seeding step.
+- Speaker diarization only activates when `/var/lib/whisper/hf-token.env`
+  contains `HF_TOKEN=hf_…` (gated pyannote models; user must accept terms of
+  `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0` on
+  huggingface.co). Without it, transcription runs but speakers show as
+  `SPEAKER_?`. Status as of 2026-07-19: token not yet installed.
+- nginx runs under `ProtectSystem=strict`; the inbox is whitelisted via
+  `ReadWritePaths`. New writable paths for nginx need the same treatment.
+
+## Gotchas
+
+- First switch after enabling a kernel-module change (e.g. the NVIDIA driver)
+  needs a reboot of the box; services like the CDI generator fail until then.
+- `hardware-configuration.nix` carries real disk UUIDs — regenerate on the box,
+  never hand-edit.
