@@ -30,7 +30,7 @@ let
 
   worker = pkgs.writeShellApplication {
     name = "whisper-worker";
-    runtimeInputs = [ pkgs.podman pkgs.jq pkgs.coreutils ];
+    runtimeInputs = [ pkgs.podman pkgs.jq pkgs.coreutils pkgs.curl ];
     text = ''
       IMAGE=${lib.escapeShellArg image}
       INBOX=/srv/whisper/inbox
@@ -59,6 +59,21 @@ let
           sleep 5
         done
       }
+
+      # The whisperx in the pinned image downloads its VAD model from an S3
+      # bucket that no longer exists (Access Denied since 2025). Seed the
+      # byte-identical file (vad.py verifies this sha256) from the current
+      # whisperX repo, which bundles it as a package asset.
+      VAD_SHA=0b5b3216d60a2d32fc086b47ea8c67589aaeb26b7e07fcbe620d6d0b83e209ea
+      VAD_FILE=/var/cache/whisperx/torch/whisperx-vad-segmentation.bin
+      if [ ! -f "$VAD_FILE" ]; then
+        mkdir -p /var/cache/whisperx/torch
+        curl -fsSL -o "$VAD_FILE.tmp" \
+          "https://github.com/m-bain/whisperX/raw/main/whisperx/assets/pytorch_model.bin"
+        echo "$VAD_SHA  $VAD_FILE.tmp" | sha256sum -c -
+        mv "$VAD_FILE.tmp" "$VAD_FILE"
+        chown -R whisper:whisper /var/cache/whisperx
+      fi
 
       shopt -s nullglob
       for audio in "$INBOX"/*; do
