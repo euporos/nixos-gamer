@@ -13,6 +13,13 @@
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
 
+  # The ESP is a Windows-created 96MB partition shared with the Microsoft
+  # bootloader (~25MB). Kernel (13MB) + one initrd (~27MB zstd) barely leaves
+  # room for a second generation, so: keep at most 2 boot entries, and
+  # xz-compress the initrd (~20MB) so two generations fit with headroom.
+  boot.loader.systemd-boot.configurationLimit = 2;
+  boot.initrd.compressor = "xz";
+
   # --- Networking -----------------------------------------------------------
   # LAN box behind the home router: NetworkManager + DHCP (no static config).
   networking.hostName = "nixos-gamer";
