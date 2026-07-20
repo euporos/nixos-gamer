@@ -10,7 +10,9 @@
       localSystem = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${localSystem};
 
-      host = "root@192.168.85.30";
+      # "gamer-nixos" is an alias from ~/.ssh/config (HostName 192.168.85.30);
+      # the explicit root@ overrides the alias's default user.
+      host = "root@gamer-nixos";
 
       # Push the current branch to origin, then rebuild nixos-gamer over SSH.
       # Evaluation happens locally (cheap); the actual building + substituting
