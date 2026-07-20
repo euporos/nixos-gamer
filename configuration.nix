@@ -25,6 +25,15 @@
   networking.hostName = "nixos-gamer";
   networking.networkmanager.enable = true;
 
+  # Wake-on-LAN on the wired NIC (enp8s0, MAC c8:fe:0f:fd:66:93). The card
+  # advertises `Supports Wake-on: pumbg`, so magic-packet ("g") works. This
+  # runs `ethtool -s enp8s0 wol g` via a systemd service; NM's default
+  # wake-on-lan setting is "preserve", so it does not clobber it. Also requires
+  # the firmware "Power On by PCI-E/onboard LAN" setting to be enabled.
+  # Remote OS choice: WoL always lands here (NixOS = systemd-boot default);
+  # to boot Windows once, `bootctl set-oneshot auto-windows && reboot`.
+  networking.interfaces."enp8s0".wakeOnLan.enable = true;
+
   networking.firewall = {
     enable = true;
     allowPing = true;
