@@ -34,6 +34,25 @@ from a machine without that alias needs it added first.
   generations fit — a third does not. If a switch fails with ENOSPC on /boot:
   delete old system generations and stale `*.tmp` files in `/boot/EFI/nixos/`.
 
+## Wake-on-LAN + remote OS selection
+
+The box is off most of the time and dual-boots NixOS/Windows. WoL powers it on
+but **cannot pick the OS** — the magic packet only says "power on". The flow:
+
+- **Wake it**: from any LAN machine, `wakeonlan c8:fe:0f:fd:66:93` (the wired NIC
+  `enp8s0`; `nix-shell -p wakeonlan`). WoL is enabled via a systemd `.link`
+  file (`networking.interfaces."enp8s0".wakeOnLan.enable` in
+  `configuration.nix`), applied by udev on every boot. Also needs the firmware
+  "Power On by PCI-E/onboard LAN" setting on. Verify with
+  `ethtool enp8s0 | grep Wake-on` → want `g`.
+- **Which OS**: NixOS is the systemd-boot default, so WoL always lands in NixOS
+  (the SSH-reachable OS). To boot Windows *once*, SSH in and run
+  `bootctl set-oneshot auto-windows && systemctl reboot` — systemd-boot boots
+  Windows next, then reverts to NixOS. Going back: just restart Windows (lands
+  on the NixOS default).
+- **Windows gotcha**: disable Windows Fast Startup, or a "shutdown" is really
+  hibernation (S4) and the NIC won't honor the magic packet from that state.
+
 ## Whisper transcription pipeline (`whisper.nix`)
 
 - Web UI: `http://192.168.85.30:8990/` — single static page
