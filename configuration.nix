@@ -76,6 +76,11 @@
   # without a sudo password prompt (see README for the one-time bootstrap).
   users.users.root.openssh.authorizedKeys.keys = [
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOUfngoK+AS94LbMt7PaxLkquhHtmpa0YiUdDBkuT1iN services@olivermotz.com"
+    # euporious.gamer power control from the NAS VM: WoL lands here (NixOS), and
+    # this key runs `bootctl set-oneshot auto-windows && reboot` (-> Windows) or
+    # `systemctl poweroff`. Private half lives on the NAS at
+    # /home/phylax/.ssh/gamer_control (euporious runs as phylax).
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE6fpoC4JQmiyzf9ls9z6aM1o7c4nCU7C/5F9GrAg3nr euporious-gamer-control@nas-nixos"
   ];
 
   programs.git = {
