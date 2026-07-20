@@ -14,6 +14,10 @@ Pushes the current branch to origin, then `nixos-rebuild switch` over SSH with
 `--build-host == --target-host` — evaluation is local, building happens on the
 box. Never build locally for the box; its internet is faster.
 
+The deploy target is `root@gamer-nixos` — `gamer-nixos` is an alias in the
+local `~/.ssh/config` (HostName 192.168.85.30, ForwardAgent yes); deploying
+from a machine without that alias needs it added first.
+
 ## Hardware constraints (violating these breaks the box)
 
 - **GPU is a GTX 1080 Ti (Pascal, sm_61).** Consequences:
