@@ -61,7 +61,7 @@ from a machine without that alias needs it added first.
   contains `HF_TOKEN=hf_…` (gated pyannote models; user must accept terms of
   `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0` on
   huggingface.co). Without it, transcription runs but speakers show as
-  `SPEAKER_?`. Status as of 2026-07-19: token not yet installed.
+  `SPEAKER_?`. Status: token installed since 2026-07-19 — diarization active.
 - nginx runs under `ProtectSystem=strict`; the inbox is whitelisted via
   `ReadWritePaths`. New writable paths for nginx need the same treatment.
 
