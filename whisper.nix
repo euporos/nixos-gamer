@@ -35,9 +35,81 @@ let
   # tag with a Pascal-capable torch:
   image = "ghcr.io/jim60105/whisperx:large-v3-de-67924da";
 
+  # Merge two per-channel WhisperX JSONs (left/right) into one speaker-labelled
+  # transcript in every output format, interleaving segments by start time.
+  # Pure stdlib. Args: <left.json> <right.json> <out-dir> <stem>. A missing or
+  # empty channel json (e.g. a silent side) contributes no segments.
+  mergeScript = pkgs.writeText "whisper-merge.py" ''
+    import json, os, sys
+
+    def load(path, speaker):
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            d = json.load(f)
+        out = []
+        for s in d.get("segments", []):
+            text = (s.get("text") or "").strip()
+            if not text:
+                continue
+            start = float(s.get("start") or 0.0)
+            out.append({
+                "start": start,
+                "end": float(s.get("end") or start),
+                "text": text,
+                "speaker": speaker,
+            })
+        return out
+
+    def srt_ts(t):
+        t = max(0.0, t)
+        h = int(t // 3600); m = int(t % 3600 // 60); s = int(t % 60)
+        ms = int(round((t - int(t)) * 1000))
+        if ms == 1000:
+            ms = 999
+        return "%02d:%02d:%02d,%03d" % (h, m, s, ms)
+
+    def mmss(t):
+        t = int(t)
+        return "%d:%02d" % (t // 60, t % 60)
+
+    left, right, outdir, stem = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+    segs = sorted(load(left, "SPEAKER_L") + load(right, "SPEAKER_R"),
+                  key=lambda s: (s["start"], s["end"]))
+    base = os.path.join(outdir, stem)
+
+    with open(base + ".json", "w") as f:
+        json.dump({"segments": segs}, f, ensure_ascii=False)
+
+    with open(base + ".speakers.txt", "w") as f:
+        for s in segs:
+            f.write("[%s] %s: %s\n" % (mmss(s["start"]), s["speaker"], s["text"]))
+
+    with open(base + ".txt", "w") as f:
+        for s in segs:
+            f.write(s["text"] + "\n")
+
+    with open(base + ".tsv", "w") as f:
+        f.write("start\tend\tspeaker\ttext\n")
+        for s in segs:
+            f.write("%d\t%d\t%s\t%s\n" % (round(s["start"] * 1000),
+                    round(s["end"] * 1000), s["speaker"], s["text"]))
+
+    with open(base + ".srt", "w") as f:
+        for i, s in enumerate(segs, 1):
+            f.write("%d\n%s --> %s\n%s: %s\n\n" % (i, srt_ts(s["start"]),
+                    srt_ts(s["end"]), s["speaker"], s["text"]))
+
+    with open(base + ".vtt", "w") as f:
+        f.write("WEBVTT\n\n")
+        for s in segs:
+            f.write("%s --> %s\n%s: %s\n\n" % (srt_ts(s["start"]).replace(",", "."),
+                    srt_ts(s["end"]).replace(",", "."), s["speaker"], s["text"]))
+  '';
+
   worker = pkgs.writeShellApplication {
     name = "whisper-worker";
-    runtimeInputs = [ pkgs.podman pkgs.jq pkgs.coreutils pkgs.curl ];
+    runtimeInputs = [ pkgs.podman pkgs.jq pkgs.coreutils pkgs.curl pkgs.ffmpeg pkgs.python3 ];
     text = ''
       IMAGE=${lib.escapeShellArg image}
       INBOX=/srv/whisper/inbox
@@ -67,6 +139,18 @@ let
         done
       }
 
+      # One WhisperX container pass over the current job. Callers set $name/$job
+      # first (dynamic scope). The fixed container name keeps cancel working —
+      # the worker is strictly serial, so only one job container ever exists.
+      run_whisperx() {
+        timeout 6h podman run --rm --replace \
+          --name whisper-job --label "file=$name" \
+          --device nvidia.com/gpu=all \
+          -v "$job:/app" \
+          -v /var/cache/whisperx:/.cache \
+          "$IMAGE" -- "$@"
+      }
+
       # The whisperx in the pinned image downloads its VAD model from an S3
       # bucket that no longer exists (Access Denied since 2025). Seed the
       # byte-identical file (vad.py verifies this sha256) from the current
@@ -86,51 +170,87 @@ let
       for audio in "$INBOX"/*; do
         [ -f "$audio" ] || continue
         name=$(basename "$audio")
-        stem=''${name%.*}
         echo "picking up: $name"
         if ! wait_until_stable "$audio"; then
           echo "giving up on $name — size never stabilized (upload stalled?)"
           continue
         fi
 
+        # A ".2ch" marker before the extension (set by the web UI's "one speaker
+        # per channel" checkbox) means: transcribe the left and right channels
+        # separately and merge, so speaker labels are exact without pyannote
+        # diarization. The marker is stripped from all output names.
+        stem=''${name%.*}
+        ext=''${name##*.}
+        dual=0
+        outstem=$stem
+        input=$name
+        case "$stem" in
+          *.2ch) dual=1; outstem=''${stem%.2ch}; input="$outstem.$ext" ;;
+        esac
+
         job=$(mktemp -d "$WORK/job.XXXXXX")
-        mv "$audio" "$job/$name"
+        mv "$audio" "$job/$input"
+
+        if [ "$dual" = 1 ]; then
+          nch=$(ffprobe -v error -select_streams a:0 \
+                  -show_entries stream=channels -of csv=p=0 "$job/$input" || echo 0)
+          if [ "$nch" = 2 ]; then
+            echo "dual-channel: splitting $name into L/R (16 kHz mono)"
+            ffmpeg -nostdin -y -loglevel error -i "$job/$input" \
+              -filter_complex "[0:a]channelsplit=channel_layout=stereo[l][r]" \
+              -map "[l]" -ar 16000 -c:a pcm_s16le "$job/L.wav" \
+              -map "[r]" -ar 16000 -c:a pcm_s16le "$job/R.wav"
+          else
+            echo "note: $name marked .2ch but has $nch channel(s) — transcribing normally"
+            dual=0
+          fi
+        fi
+
         # uid 1001 == our 'whisper' user == the container's non-root user
         chown -R whisper:whisper "$job"
         chmod 770 "$job"
 
-        args=(--compute_type int8 --output_format all --output_dir /app)
-        if [ -n "$HF_TOKEN" ]; then
-          args+=(--diarize --hf_token "$HF_TOKEN")
+        ok=1
+        if [ "$dual" = 1 ]; then
+          # One WhisperX pass per channel (json only) — each channel is a single
+          # known speaker, so diarization is neither needed nor run.
+          if run_whisperx --compute_type int8 --output_format json --output_dir /app L.wav \
+             && run_whisperx --compute_type int8 --output_format json --output_dir /app R.wav; then
+            python3 ${mergeScript} "$job/L.json" "$job/R.json" "$job" "$outstem"
+          else
+            ok=0
+          fi
         else
-          echo "note: no HF token in $TOKEN_FILE — transcribing WITHOUT speaker diarization"
+          args=(--compute_type int8 --output_format all --output_dir /app)
+          if [ -n "$HF_TOKEN" ]; then
+            args+=(--diarize --hf_token "$HF_TOKEN")
+          else
+            echo "note: no HF token in $TOKEN_FILE — transcribing WITHOUT speaker diarization"
+          fi
+          if run_whisperx "''${args[@]}" "$input"; then
+            # Distill a readable speaker-labelled transcript out of the json.
+            if [ -f "$job/$outstem.json" ]; then
+              jq -r '
+                .segments[]
+                | ((.start // 0) | floor) as $t
+                | "[\(($t / 60) | floor):\(("0" + (($t % 60) | tostring)) | .[-2:])] \(.speaker // "SPEAKER_?"): \(.text | sub("^\\s+"; ""))"
+              ' "$job/$outstem.json" > "$job/$outstem.speakers.txt" || true
+            fi
+          else
+            ok=0
+          fi
         fi
 
-        # Fixed container name: the worker is strictly serial, so only one job
-        # container ever exists. whisper-control kills it by name to cancel;
-        # the label lets it verify which file the container is working on.
-        # --replace clears a leftover container after an unclean shutdown.
-        if timeout 6h podman run --rm --replace \
-            --name whisper-job --label "file=$name" \
-            --device nvidia.com/gpu=all \
-            -v "$job:/app" \
-            -v /var/cache/whisperx:/.cache \
-            "$IMAGE" -- "''${args[@]}" "$name"; then
-          # Distill a readable speaker-labelled transcript out of the json.
-          if [ -f "$job/$stem.json" ]; then
-            jq -r '
-              .segments[]
-              | ((.start // 0) | floor) as $t
-              | "[\(($t / 60) | floor):\(("0" + (($t % 60) | tostring)) | .[-2:])] \(.speaker // "SPEAKER_?"): \(.text | sub("^\\s+"; ""))"
-            ' "$job/$stem.json" > "$job/$stem.speakers.txt" || true
-          fi
-          mv "$job/$name" "$DONE/$name"
+        if [ "$ok" = 1 ]; then
+          mv "$job/$input" "$DONE/$name"
+          rm -f "$job"/L.wav "$job"/R.wav "$job"/L.json "$job"/R.json
           find "$job" -mindepth 1 -maxdepth 1 -exec mv -t "$OUT" {} +
           rmdir "$job"
-          echo "done: $name -> $OUT/$stem.*"
+          echo "done: $name -> $OUT/$outstem.*"
         else
           echo "FAILED: $name — moving audio to $FAIL"
-          mv "$job/$name" "$FAIL/$name" || true
+          mv "$job/$input" "$FAIL/$name" || true
           rm -rf "$job"
         fi
       done

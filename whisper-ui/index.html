@@ -81,6 +81,26 @@
   #dropzone .label{margin-top:10px;letter-spacing:.12em;text-transform:uppercase;font-size:13px}
   #dropzone .label span{color:var(--dim);text-transform:none;letter-spacing:0}
   #dropzone .hint{margin-top:4px;color:var(--faint);font-size:11px;letter-spacing:.2em}
+  .dual-opt{
+    display:flex;align-items:flex-start;gap:9px;cursor:pointer;
+    margin-top:12px;padding:9px 12px;
+    border:1px solid var(--line);background:var(--panel);
+    color:var(--dim);font-size:12px;line-height:1.45;
+  }
+  .dual-opt:hover{border-color:var(--faint)}
+  .dual-opt input{
+    appearance:none;-webkit-appearance:none;flex:none;margin-top:2px;
+    width:14px;height:14px;border:1px solid var(--faint);background:var(--bg);
+    cursor:pointer;position:relative;
+  }
+  .dual-opt input:checked{border-color:var(--amber);background:var(--amber)}
+  .dual-opt input:checked::after{
+    content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;
+    border:solid var(--bg);border-width:0 2px 2px 0;transform:rotate(45deg);
+  }
+  .dual-opt input:focus-visible{outline:1px solid var(--amber-hi);outline-offset:2px}
+  .dual-opt b{color:var(--ink);font-weight:700}
+  .dual-opt span{color:var(--faint)}
 
   /* ---------- sections ---------- */
   h2{
@@ -189,6 +209,13 @@
     <div class="label">drop audio to transcribe <span>— or click to choose</span></div>
     <div class="hint">m4a · mp3 · wav · ogg · opus · mp4 · mkv</div>
   </div>
+
+  <label class="dual-opt" title="Left channel = one speaker, right channel = the other">
+    <input type="checkbox" id="dualch">
+    <span><b>one speaker per channel</b> — stereo file with each speaker isolated
+    on the left/right channel. Transcribes each side separately for exact
+    <span>SPEAKER_L</span>/<span>SPEAKER_R</span> labels (no diarization).</span>
+  </label>
 
   <h2>Jobs</h2>
   <div id="jobs"><div class="empty">nothing queued, nothing running</div></div>
@@ -435,8 +462,13 @@ async function loadPreview(stem){
 }
 
 /* ---------- upload ---------- */
+// insert the ".2ch" marker before the extension so the worker splits L/R
+const markDual = n => {
+  const dot = n.lastIndexOf('.');
+  return dot > 0 ? n.slice(0, dot) + '.2ch' + n.slice(dot) : n + '.2ch';
+};
 function uploadFile(file){
-  const name = file.name;
+  const name = $('#dualch').checked ? markDual(file.name) : file.name;
   uploads[name] = {pct: 0};
   // probe the audio duration client-side so the ETA bar has something to aim at
   const url = URL.createObjectURL(file);

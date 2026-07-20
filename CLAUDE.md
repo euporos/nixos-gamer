@@ -57,6 +57,16 @@ from a machine without that alias needs it added first.
 - The image's whisperx downloads its VAD model from a **dead S3 bucket**; the
   worker pre-seeds the sha-verified file into `/var/cache/whisperx/torch/`
   from the whisperX repo's bundled asset. Keep that seeding step.
+- **Dual-channel (one speaker per channel)**: the UI's "one speaker per
+  channel" checkbox inserts a `.2ch` marker before the extension (e.g.
+  `talk.2ch.m4a`); `curl -T talk.m4a http://…/talk.2ch.m4a` triggers it too.
+  The worker then ffprobe-verifies 2 channels, ffmpeg-splits L/R into 16 kHz
+  mono, runs WhisperX once per channel (json only, **no diarization**), and a
+  stdlib Python helper (`whisper-merge.py`) interleaves the segments by start
+  time into `SPEAKER_L`/`SPEAKER_R`, emitting the full format set. The `.2ch`
+  marker is stripped from every output name. A file wrongly marked (not really
+  stereo) falls back to normal transcription. This is exact and free of the HF
+  token — prefer it whenever speakers are physically channel-separated.
 - Speaker diarization only activates when `/var/lib/whisper/hf-token.env`
   contains `HF_TOKEN=hf_…` (gated pyannote models; user must accept terms of
   `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0` on
