@@ -176,18 +176,32 @@ let
           continue
         fi
 
-        # A ".2ch" marker before the extension (set by the web UI's "one speaker
-        # per channel" checkbox) means: transcribe the left and right channels
-        # separately and merge, so speaker labels are exact without pyannote
-        # diarization. The marker is stripped from all output names.
+        # Markers appended before the extension (by the web UI or curl) route
+        # the job. ".2ch" = transcribe the left/right channels separately and
+        # merge, so speaker labels are exact without pyannote diarization.
+        # ".lang-XX" = force the transcription language (de/en/ru/fr). Strip any
+        # recognised trailing markers, in any order; language defaults to German
+        # (the image also bakes --language de, which our flag overrides). All
+        # markers are stripped from output names.
         stem=''${name%.*}
         ext=''${name##*.}
         dual=0
+        lang=de
         outstem=$stem
+        while :; do
+          case "$outstem" in
+            *.2ch)     dual=1; outstem=''${outstem%.2ch} ;;
+            *.lang-de) lang=de; outstem=''${outstem%.lang-de} ;;
+            *.lang-en) lang=en; outstem=''${outstem%.lang-en} ;;
+            *.lang-ru) lang=ru; outstem=''${outstem%.lang-ru} ;;
+            *.lang-fr) lang=fr; outstem=''${outstem%.lang-fr} ;;
+            *) break ;;
+          esac
+        done
+        echo "routing $name: language=$lang dual=$dual"
+        # Give the working copy the marker-free name so outputs are clean.
         input=$name
-        case "$stem" in
-          *.2ch) dual=1; outstem=''${stem%.2ch}; input="$outstem.$ext" ;;
-        esac
+        if [ "$outstem" != "$stem" ]; then input="$outstem.$ext"; fi
 
         job=$(mktemp -d "$WORK/job.XXXXXX")
         mv "$audio" "$job/$input"
@@ -215,14 +229,14 @@ let
         if [ "$dual" = 1 ]; then
           # One WhisperX pass per channel (json only) — each channel is a single
           # known speaker, so diarization is neither needed nor run.
-          if run_whisperx --compute_type int8 --output_format json --output_dir /app L.wav \
-             && run_whisperx --compute_type int8 --output_format json --output_dir /app R.wav; then
+          if run_whisperx --compute_type int8 --output_format json --output_dir /app --language "$lang" L.wav \
+             && run_whisperx --compute_type int8 --output_format json --output_dir /app --language "$lang" R.wav; then
             python3 ${mergeScript} "$job/L.json" "$job/R.json" "$job" "$outstem"
           else
             ok=0
           fi
         else
-          args=(--compute_type int8 --output_format all --output_dir /app)
+          args=(--compute_type int8 --output_format all --output_dir /app --language "$lang")
           if [ -n "$HF_TOKEN" ]; then
             args+=(--diarize --hf_token "$HF_TOKEN")
           else

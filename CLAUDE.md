@@ -67,6 +67,16 @@ from a machine without that alias needs it added first.
   marker is stripped from every output name. A file wrongly marked (not really
   stereo) falls back to normal transcription. This is exact and free of the HF
   token — prefer it whenever speakers are physically channel-separated.
+- **Language**: the pinned image's entrypoint bakes `--language de` (env
+  `LANG=de`), so the default is German. The worker overrides it per-job by
+  passing `--language <code>` *after* the baked flag (whisperx argparse takes
+  the last value). A `.lang-XX` filename marker (UI dropdown, or curl to
+  `…/talk.lang-en.m4a`) selects the language; supported: `de` (default), `en`,
+  `ru`, `fr`. Non-German alignment models download from HF at runtime (the box
+  has internet); `de`'s alignment model is baked into the `-de` image tag.
+  Adding a language means: add the `.lang-XX` case in the worker's marker
+  loop **and** an `<option>` in the UI — nothing else. Marker is stripped from
+  output names, and combines with `.2ch` in any order.
 - Speaker diarization only activates when `/var/lib/whisper/hf-token.env`
   contains `HF_TOKEN=hf_…` (gated pyannote models; user must accept terms of
   `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0` on
