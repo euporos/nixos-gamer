@@ -28,11 +28,22 @@ from a machine without that alias needs it added first.
     This is why the WhisperX container image in `whisper.nix` is pinned to a
     2024 build (torch 2.1.1). Do not bump it to a floating tag.
   - No usable fp16 on Pascal; CTranslate2/faster-whisper runs `int8` (dp4a).
-- **The ESP (`/boot`) is a tiny 96MB Windows-created partition** shared with
-  the Microsoft bootloader (~25MB). Kernel ≈ 13MB, initrd ≈ 20MB (xz).
-  `configurationLimit = 2` + `boot.initrd.compressor = "xz"` exist to make two
-  generations fit — a third does not. If a switch fails with ENOSPC on /boot:
-  delete old system generations and stale `*.tmp` files in `/boot/EFI/nixos/`.
+- **The ESP is a tiny 96MB Windows-created partition** (`nvme0n1p1`, mounted at
+  `/boot/efi`) shared with the Microsoft bootloader (~27MB). It is boxed in
+  between the disk start and the Windows partitions, so it **cannot be grown**.
+  - **Bootloader is GRUB, on purpose** (`configuration.nix`). systemd-boot
+    (Boot Loader Spec) copies kernel+initrd (~38MB/gen) ONTO the ESP per
+    generation; two *differing* generations + Windows overflow 96MB → ENOSPC
+    mid-deploy on the next kernel bump. GRUB reads kernel/initrd straight from
+    `/nix/store` on the ext4 root and puts only a small stub on the ESP, so the
+    per-generation ESP growth is gone and there is no generation limit. The
+    `euporos` laptop runs the same setup (identical Windows-first 96MB ESP).
+  - Mount layout: ESP at `/boot/efi` (`hardware-configuration.nix`); `/boot` is
+    a plain dir on the ext4 root holding `grub/grub.cfg` (kernels stay in the
+    store, not copied). Do **not** revert the ESP to mounting at `/boot`.
+  - Migrating the bootloader (or reinstalling GRUB) needs
+    `NIXOS_INSTALL_BOOTLOADER=1` / `nixos-rebuild switch --install-bootloader`
+    — a plain switch will not rewrite the ESP stub.
 
 ## Wake-on-LAN + remote OS selection
 
@@ -45,11 +56,13 @@ but **cannot pick the OS** — the magic packet only says "power on". The flow:
   `configuration.nix`), applied by udev on every boot. Also needs the firmware
   "Power On by PCI-E/onboard LAN" setting on. Verify with
   `ethtool enp8s0 | grep Wake-on` → want `g`.
-- **Which OS**: NixOS is the systemd-boot default, so WoL always lands in NixOS
+- **Which OS**: NixOS is the GRUB default entry, so WoL always lands in NixOS
   (the SSH-reachable OS). To boot Windows *once*, SSH in and run
-  `bootctl set-oneshot auto-windows && systemctl reboot` — systemd-boot boots
-  Windows next, then reverts to NixOS. Going back: just restart Windows (lands
-  on the NixOS default).
+  `grub-reboot "<Windows entry>" && systemctl reboot` — GRUB boots Windows next
+  (one-shot via grubenv), then reverts to the NixOS default. Find the exact
+  entry name (os-prober-generated) in `/boot/grub/grub.cfg` (a `menuentry
+  "Windows Boot Manager …"`). Going back: just restart Windows (lands on the
+  NixOS default).
 - **Windows gotcha**: disable Windows Fast Startup, or a "shutdown" is really
   hibernation (S4) and the NIC won't honor the magic packet from that state.
 

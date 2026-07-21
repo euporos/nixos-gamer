@@ -8,17 +8,29 @@
   ];
 
   # --- Boot -----------------------------------------------------------------
-  # Existing machine: UEFI + systemd-boot. canTouchEfiVariables is true here
-  # (unlike the netcup VPS) because this box has a real, writable EFI NVRAM.
-  boot.loader.systemd-boot.enable = true;
+  # UEFI + GRUB. canTouchEfiVariables is true because this box has a real,
+  # writable EFI NVRAM (creates the GRUB boot entry on install).
+  #
+  # Why GRUB and not systemd-boot: the ESP is a Windows-created 96MB partition
+  # shared with the Microsoft bootloader (~27MB). systemd-boot (Boot Loader
+  # Spec) must copy the kernel (13MB) + initrd (~25MB) ONTO the ESP per
+  # generation, so two *differing* generations (77MB) + Windows (27MB) overflow
+  # 96MB → ENOSPC mid-deploy on the next kernel bump. GRUB instead reads the
+  # kernel/initrd straight from /nix/store on the ext4 root and puts only a
+  # small stub on the ESP — the per-generation growth vanishes and the 96MB
+  # ceiling is gone. This mirrors the euporos laptop (identical Windows-first
+  # 96MB ESP, GRUB, no /boot problem). Migration was done with
+  # `nixos-rebuild switch --install-bootloader` after remounting the ESP from
+  # /boot to /boot/efi (see hardware-configuration.nix).
+  boot.loader.systemd-boot.enable = false;
   boot.loader.efi.canTouchEfiVariables = true;
-
-  # The ESP is a Windows-created 96MB partition shared with the Microsoft
-  # bootloader (~25MB). Kernel (13MB) + one initrd (~27MB zstd) barely leaves
-  # room for a second generation, so: keep at most 2 boot entries, and
-  # xz-compress the initrd (~20MB) so two generations fit with headroom.
-  boot.loader.systemd-boot.configurationLimit = 2;
-  boot.initrd.compressor = "xz";
+  boot.loader.efi.efiSysMountPoint = "/boot/efi";
+  boot.loader.grub = {
+    enable = true;
+    efiSupport = true;
+    device = "nodev";     # EFI install, no MBR target
+    useOSProber = true;   # detect the Windows Boot Manager → GRUB menu entry
+  };
 
   # --- Networking -----------------------------------------------------------
   # LAN box behind the home router: NetworkManager + DHCP (no static config).
@@ -30,8 +42,10 @@
   # runs `ethtool -s enp8s0 wol g` via a systemd service; NM's default
   # wake-on-lan setting is "preserve", so it does not clobber it. Also requires
   # the firmware "Power On by PCI-E/onboard LAN" setting to be enabled.
-  # Remote OS choice: WoL always lands here (NixOS = systemd-boot default);
-  # to boot Windows once, `bootctl set-oneshot auto-windows && reboot`.
+  # Remote OS choice: WoL always lands here (NixOS = GRUB default entry);
+  # to boot Windows once, `grub-reboot "<Windows entry>" && reboot` (find the
+  # exact entry name in /boot/grub/grub.cfg — grub-reboot sets a one-shot via
+  # grubenv, reverting to the NixOS default afterward).
   networking.interfaces."enp8s0".wakeOnLan.enable = true;
 
   networking.firewall = {

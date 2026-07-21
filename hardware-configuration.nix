@@ -20,7 +20,10 @@
       fsType = "ext4";
     };
 
-  fileSystems."/boot" =
+  # ESP mounted at /boot/efi (not /boot) so GRUB keeps kernels on the ext4
+  # root and only its stub lands on this cramped 96MB Windows-shared ESP.
+  # /boot itself is a plain directory on the ext4 root. UUID unchanged.
+  fileSystems."/boot/efi" =
     { device = "/dev/disk/by-uuid/EC72-7C23";
       fsType = "vfat";
       options = [ "fmask=0077" "dmask=0077" ];
