@@ -84,6 +84,41 @@ but **cannot pick the OS** — the magic packet only says "power on". The flow:
 - **Windows gotcha**: disable Windows Fast Startup, or a "shutdown" is really
   hibernation (S4) and the NIC won't honor the magic packet from that state.
 
+## Secrets (sops-nix)
+
+Secrets are age-encrypted and **checked into the repo** as ciphertext
+(`secrets/secrets.yaml`), decrypted on the box at `nixos-rebuild` activation.
+This replaced the old hand-placed plaintext files
+(`/var/lib/whisper/hf-token.env`, `/etc/nixos/secrets/smb-secrets`).
+
+- **Files**: `flake.nix` pulls the `sops-nix` input and adds
+  `sops-nix.nixosModules.sops`; `sops.nix` declares the secrets and the
+  decryption identity; `.sops.yaml` lists the recipients; `secrets/secrets.yaml`
+  holds the ciphertext. Consumers read `config.sops.secrets.<name>.path`
+  (`whisper.nix` → `hf-token`, `configuration.nix` CIFS mount → `smb-secrets`).
+- **Recipients** (both can decrypt every secret): the operator's **admin age
+  key**, held in `pass` at `admin-age-keys/universal` (lets a human edit); and
+  the box's **SSH host key** `/etc/ssh/ssh_host_ed25519_key` (lets the machine
+  decrypt at activation — never leaves the box, never in the repo). The host
+  recipient is `age1xp2glg…`; regenerate it after any host-key change with
+  `ssh-keyscan -t ed25519 192.168.85.30 | ssh-to-age`, update `.sops.yaml`,
+  then `sops updatekeys secrets/secrets.yaml`.
+- **Decrypted paths**: `/run/secrets/<name>` (tmpfs, mode 0400 root). The
+  whisper worker and mount.cifs both run as root, so 0400-root is fine.
+- **Edit the secrets** (operator, on a machine holding the admin key):
+  ```
+  SOPS_AGE_KEY="$(pass show admin-age-keys/universal | grep -v '^#')" \
+    nix-shell -p sops --run 'sops secrets/secrets.yaml'
+  ```
+  Keys: `hf-token` = `HF_TOKEN=hf_…` (whole env-file line, the worker sources
+  it); `smb-secrets` = a `username=`/`password=` block. **Run `pass` yourself**
+  — the Claude Code harness is hard-blocked from invoking it (a global
+  PreToolUse guard), so Claude handles only public data (age *recipients*),
+  never the private key or plaintext secret values.
+- **Ordering**: secrets materialize at activation, before the (lazy,
+  `x-systemd.automount`) NAS mount and the path-triggered whisper worker ever
+  need them — no boot-time race.
+
 ## Whisper transcription pipeline (`whisper.nix`)
 
 - Web UI: `http://192.168.85.30:8990/` — single static page
@@ -109,10 +144,11 @@ but **cannot pick the OS** — the magic packet only says "power on". The flow:
   Delivery is **best-effort**: the share is an automounted CIFS mount (`nofail`
   + `x-systemd.automount`, `configuration.nix`) so an offline NAS only logs a
   `WARN` and never fails a job — the local copy is retained and can be
-  re-synced. Requires the CIFS credentials file at
-  `/etc/nixos/secrets/smb-secrets` (`username=`/`password=`, mode 600) — a
-  secret placed out of band like the HF token, **not** in the repo; until it
-  exists the mount can't authenticate and delivery just WARNs.
+  re-synced. The CIFS `username=`/`password=` credentials are the `smb-secrets`
+  entry in the encrypted `secrets/secrets.yaml`, decrypted by sops-nix to
+  `/run/secrets/smb-secrets` at activation (see **Secrets (sops-nix)** below).
+  Until that entry has real values the mount can't authenticate and delivery
+  just WARNs.
 - The container user is uid 1001 == host user `whisper` (fixed uid, on
   purpose — bind-mounted job dirs rely on it).
 - The image's whisperx downloads its VAD model from a **dead S3 bucket**; the
@@ -138,11 +174,12 @@ but **cannot pick the OS** — the magic packet only says "power on". The flow:
   Adding a language means: add the `.lang-XX` case in the worker's marker
   loop **and** an `<option>` in the UI — nothing else. Marker is stripped from
   output names, and combines with `.2ch` in any order.
-- Speaker diarization only activates when `/var/lib/whisper/hf-token.env`
-  contains `HF_TOKEN=hf_…` (gated pyannote models; user must accept terms of
-  `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0` on
-  huggingface.co). Without it, transcription runs but speakers show as
-  `SPEAKER_?`. Status: token installed since 2026-07-19 — diarization active.
+- Speaker diarization only activates when the `hf-token` secret decrypts to a
+  `HF_TOKEN=hf_…` line at `/run/secrets/hf-token` (gated pyannote models; user
+  must accept terms of `pyannote/speaker-diarization-3.1` and
+  `pyannote/segmentation-3.0` on huggingface.co). Without it, transcription
+  runs but speakers show as `SPEAKER_?`. Status: token installed since
+  2026-07-19 (now carried in `secrets/secrets.yaml`) — diarization active.
 - nginx runs under `ProtectSystem=strict`; the inbox is whitelisted via
   `ReadWritePaths`. New writable paths for nginx need the same treatment.
 

@@ -3,9 +3,14 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+
+    # Encrypted secrets checked into the repo (age-encrypted, decrypted on the
+    # box at activation using its SSH host key). See sops.nix / .sops.yaml.
+    sops-nix.url = "github:Mic92/sops-nix";
+    sops-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, sops-nix }:
     let
       localSystem = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${localSystem};
@@ -46,6 +51,7 @@
         modules = [
           ./hardware-configuration.nix
           ./configuration.nix
+          sops-nix.nixosModules.sops
         ];
       };
 

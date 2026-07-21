@@ -1,4 +1,4 @@
-{ pkgs, lib, ... }:
+{ config, pkgs, lib, ... }:
 
 # German speech-to-text pipeline with speaker diarization.
 #
@@ -28,7 +28,9 @@
 #   1. Accept the terms of hf.co/pyannote/speaker-diarization-3.1
 #      and hf.co/pyannote/segmentation-3.0
 #   2. Create a read token at hf.co/settings/tokens
-#   3. On the box:  echo 'HF_TOKEN=hf_...' > /var/lib/whisper/hf-token.env  (as root)
+#   3. Put HF_TOKEN=hf_... into the encrypted secrets under the "hf-token" key
+#      (sops secrets/secrets.yaml — see sops.nix), then deploy. It is decrypted
+#      to /run/secrets/hf-token on the box and sourced below.
 
 let
   # Pinned to the 2024-03-17 build (torch 2.1.1): current builds of this image
@@ -123,7 +125,9 @@ let
       # (configuration.nix), so it may be offline — delivery is best-effort and
       # never fails a job; $OUT stays the local source of truth for the web UI.
       NAS=/media/NAS/Netspace/artifacts/transcriptions
-      TOKEN_FILE=/var/lib/whisper/hf-token.env
+      # HF token (HF_TOKEN=hf_... line), decrypted from the repo by sops-nix
+      # to /run/secrets/hf-token at activation (see sops.nix). Sourced below.
+      TOKEN_FILE=${config.sops.secrets."hf-token".path}
 
       HF_TOKEN=""
       if [ -f "$TOKEN_FILE" ]; then

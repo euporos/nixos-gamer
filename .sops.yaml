@@ -1,0 +1,20 @@
+# sops recipient policy: who can decrypt secrets/*.yaml.
+#
+#   admin  — operator's age key, held in `pass` (admin-age-keys/universal).
+#            Lets a human `sops edit` the secrets. Private half never in repo.
+#   gamer  — this box's SSH host key (ed25519), converted to age. Lets the
+#            machine decrypt at nixos-rebuild activation. Private half lives
+#            only on the box at /etc/ssh/ssh_host_ed25519_key.
+#
+# Every secret is encrypted to BOTH, so either can decrypt independently.
+# To add a recipient later: add it here, then `sops updatekeys secrets/secrets.yaml`.
+keys:
+  - &admin age1zp3r2yq54zmwjtfu59s62nruuwng875a503dn938xeu4lkdq43pqqdjgwk
+  - &gamer age1xp2glg3lhkvtsgdvh44fyjx7usn6d5jv9d6glsayv0x47jrhh4zqdn3vww
+
+creation_rules:
+  - path_regex: secrets/[^/]+\.yaml$
+    key_groups:
+      - age:
+          - *admin
+          - *gamer

@@ -5,6 +5,7 @@
     ./hardware-configuration.nix
     ./nvidia.nix
     ./whisper.nix
+    ./sops.nix
   ];
 
   # --- Boot -----------------------------------------------------------------
@@ -64,10 +65,11 @@
 
   # --- Storage: NAS (CIFS) --------------------------------------------------
   # Mount //192.168.85.50/Netspace the same way nas-nixos does (cifs,
-  # credentials at /etc/nixos/secrets/smb-secrets — a username=/password= file
-  # that is NOT in the repo; place it out of band like the whisper HF token,
-  # mode 600). This is the delivery target for finished transcripts: whisper.nix
-  # writes one folder per transcript under artifacts/transcriptions/.
+  # username=/password= credentials). The credentials file is decrypted from
+  # the repo by sops-nix (see sops.nix) to /run/secrets/smb-secrets at
+  # activation — no longer hand-placed at /etc/nixos/secrets/smb-secrets. This
+  # is the delivery target for finished transcripts: whisper.nix writes one
+  # folder per transcript under artifacts/transcriptions/.
   #
   # Deviation from nas-nixos, on purpose: nofail + x-systemd.automount. This box
   # is headless and off most of the time (WoL), so a NAS that is unreachable at
@@ -84,7 +86,7 @@
       "x-systemd.idle-timeout=60"
       "x-systemd.device-timeout=30s"
       "x-systemd.mount-timeout=30s"
-      "credentials=/etc/nixos/secrets/smb-secrets"
+      "credentials=${config.sops.secrets."smb-secrets".path}"
       "uid=1000"
       "gid=100"
     ];
