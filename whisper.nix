@@ -129,10 +129,15 @@ let
       # to /run/secrets/hf-token at activation (see sops.nix). Sourced below.
       TOKEN_FILE=${config.sops.secrets."hf-token".path}
 
+      # Read the token WITHOUT sourcing it. The value is secret and may contain
+      # shell metacharacters () > | etc. — `. "$TOKEN_FILE"` would parse those
+      # and abort the whole worker (took down plain transcription too, not just
+      # diarization). Read the first line verbatim and strip an optional
+      # HF_TOKEN= prefix; pure bash, no shell interpretation of the value.
       HF_TOKEN=""
       if [ -f "$TOKEN_FILE" ]; then
-        # shellcheck disable=SC1090
-        . "$TOKEN_FILE"
+        IFS= read -r HF_TOKEN < "$TOKEN_FILE" || true
+        HF_TOKEN=''${HF_TOKEN#HF_TOKEN=}
       fi
 
       # A file may still be mid-upload (scp writes in place). Wait until its
