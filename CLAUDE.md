@@ -44,6 +44,24 @@ from a machine without that alias needs it added first.
   - Migrating the bootloader (or reinstalling GRUB) needs
     `NIXOS_INSTALL_BOOTLOADER=1` / `nixos-rebuild switch --install-bootloader`
     — a plain switch will not rewrite the ESP stub.
+  - **Boot resilience (why the ESP can't brick the box):** Windows keeps
+    setting the FAT dirty bit on this shared ESP (Fast Startup / updates), which
+    fails `systemd-fsck@boot-efi`. The ESP is therefore `nofail` +
+    `x-systemd.device-timeout=5s` (`hardware-configuration.nix`) — a failed
+    fsck/mount is non-fatal and boot continues, because the ESP is only needed
+    at rebuild time (GRUB stub), never at runtime. Belt-and-suspenders,
+    `systemd.enableEmergencyMode = false` (`configuration.nix`) means *any*
+    boot fault continues to `multi-user.target` (network + sshd) instead of a
+    dead console root-password prompt. Without both, a dirty ESP dropped the
+    headless box to emergency mode = remotely dead until someone walked over
+    with a keyboard.
+  - **Deploy caveat — degraded ⇒ remount ESP first:** because of `nofail`, when
+    the ESP got skipped at boot it stays *unmounted* and
+    `systemctl is-system-running` reports `degraded`. Before the next
+    `nix run .#deploy`, ssh in and
+    `fsck.vfat -aw /dev/disk/by-uuid/EC72-7C23 && mount /boot/efi` — otherwise
+    GRUB writes its stub to the empty `/boot/efi` dir on the ext4 root instead
+    of the real ESP, and the bootloader silently isn't updated.
 
 ## Wake-on-LAN + remote OS selection
 
