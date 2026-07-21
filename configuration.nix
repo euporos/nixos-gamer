@@ -22,6 +22,14 @@
   # 96MB ESP, GRUB, no /boot problem). Migration was done with
   # `nixos-rebuild switch --install-bootloader` after remounting the ESP from
   # /boot to /boot/efi (see hardware-configuration.nix).
+  # Headless safety valve: NEVER drop to an interactive emergency/rescue shell
+  # on boot. This box lives at 192.168.85.30 and is driven remotely (WoL from the
+  # NAS); a failed mount stranding it at a console root-password prompt with no
+  # sshd means it's dead until someone walks over with a keyboard. With this off,
+  # any boot failure that would have gone to emergency mode instead continues to
+  # multi-user.target, so the network and sshd come up and it stays reachable.
+  systemd.enableEmergencyMode = false;
+
   boot.loader.systemd-boot.enable = false;
   boot.loader.efi.canTouchEfiVariables = true;
   boot.loader.efi.efiSysMountPoint = "/boot/efi";

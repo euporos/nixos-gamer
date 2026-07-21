@@ -23,10 +23,17 @@
   # ESP mounted at /boot/efi (not /boot) so GRUB keeps kernels on the ext4
   # root and only its stub lands on this cramped 96MB Windows-shared ESP.
   # /boot itself is a plain directory on the ext4 root. UUID unchanged.
+  # nofail + short device-timeout: the ESP is only needed at nixos-rebuild time
+  # (to write the GRUB stub), NEVER at runtime. This box shares the FAT ESP with
+  # Windows, which keeps leaving the FAT dirty bit set (Fast Startup / updates);
+  # a dirty FS fails systemd-fsck@boot-efi, and without nofail that failure fails
+  # local-fs.target → the headless box drops to an emergency root-password prompt
+  # with no sshd. nofail makes fsck/mount non-fatal so boot continues and stays
+  # remotely reachable. Remount by hand (mount /boot/efi) before a rebuild.
   fileSystems."/boot/efi" =
     { device = "/dev/disk/by-uuid/EC72-7C23";
       fsType = "vfat";
-      options = [ "fmask=0077" "dmask=0077" ];
+      options = [ "fmask=0077" "dmask=0077" "nofail" "x-systemd.device-timeout=5s" ];
     };
 
   swapDevices = [ ];
