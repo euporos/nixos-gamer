@@ -89,3 +89,41 @@ place, and `nix run .#deploy` works from this repo without any password prompt.
 > `services@olivermotz.com` key for both `phylax` and `root`. That key is already
 > in `phylax`'s stateful `authorized_keys` on the box, so you will not be locked
 > out by the first switch.
+
+## Windows side (dual-boot): OpenSSH for remote power control
+
+The `euporious.gamer` module (runs on `nas-nixos`) drives this box's power/boot
+from the LAN. On the **Windows** side it SSHes in as user `phylax` to read a
+status banner and to run `shutdown /s` (power off) / `shutdown /r` (the
+Windows→NixOS hop). Windows therefore needs OpenSSH Server running and the NAS
+control key authorized. Verified working 2026-07-21.
+
+**The non-obvious gotcha:** `phylax` is a **local administrator**, so sshd
+*ignores* `C:\Users\phylax\.ssh\authorized_keys`. The key must live in
+`C:\ProgramData\ssh\administrators_authorized_keys` **with ACLs restricted to
+Administrators + SYSTEM** — otherwise sshd silently refuses it and auth fails
+with no useful error.
+
+One-time setup, in an **elevated** PowerShell on Windows:
+
+```powershell
+$key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE6fpoC4JQmiyzf9ls9z6aM1o7c4nCU7C/5F9GrAg3nr euporious-gamer-control@nas-nixos'
+
+(Get-WindowsCapability -Online -Name OpenSSH.Server*) | ? State -ne Installed | % { Add-WindowsCapability -Online -Name $_.Name }
+Set-Service sshd -StartupType Automatic; Start-Service sshd          # Automatic = survives reboot
+
+if (-not (Get-NetFirewallRule -Name sshd -EA SilentlyContinue)) {
+  New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 }
+
+$ak = "$env:ProgramData\ssh\administrators_authorized_keys"          # admin -> NOT ~/.ssh
+if (-not (Test-Path $ak) -or (Get-Content $ak -Raw) -notmatch 'euporious-gamer-control') { Add-Content $ak $key -Encoding ascii }
+icacls.exe $ak /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F'   # required, or sshd ignores the file
+```
+
+- The authorized key is the public half of `/home/phylax/.ssh/gamer_control` on
+  `nas-nixos` (`euporious-gamer-control@nas-nixos`). Its NixOS counterpart is
+  `root@gamer`, authorized in `configuration.nix`.
+- Verify from the NAS: `ssh -i /home/phylax/.ssh/gamer_control -o StrictHostKeyChecking=no phylax@192.168.85.30 whoami` → `desktop-mksqeig\phylax`.
+- The banner `SSH-2.0-OpenSSH_for_Windows_9.5` is what the gamer status probe
+  reads to report `:windows`; without sshd the box reads as `:off` even while
+  running Windows.
