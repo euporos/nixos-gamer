@@ -7,6 +7,8 @@
 #   upload:      curl -T aufnahme.m4a http://192.168.85.30:8990/
 #                (or: scp aufnahme.m4a phylax@192.168.85.30:/srv/whisper/inbox/)
 #   transcripts: /srv/whisper/transcripts/  (also http://192.168.85.30:8990/transcripts/)
+#                and delivered (one folder per transcript) to the NAS at
+#                /media/NAS/Netspace/artifacts/transcriptions/<stem>/
 #
 # The UI has no state of its own: it polls nginx autoindex-JSON listings of
 # inbox/work/failed/transcripts (so jobs started via curl/scp show up too) and
@@ -117,6 +119,10 @@ let
       OUT=/srv/whisper/transcripts
       DONE=/srv/whisper/processed
       FAIL=/srv/whisper/failed
+      # NAS delivery target: one folder per transcript. Automounted CIFS share
+      # (configuration.nix), so it may be offline — delivery is best-effort and
+      # never fails a job; $OUT stays the local source of truth for the web UI.
+      NAS=/media/NAS/Netspace/artifacts/transcriptions
       TOKEN_FILE=/var/lib/whisper/hf-token.env
 
       HF_TOKEN=""
@@ -259,6 +265,16 @@ let
         if [ "$ok" = 1 ]; then
           mv "$job/$input" "$DONE/$name"
           rm -f "$job"/L.wav "$job"/R.wav "$job"/L.json "$job"/R.json
+          # $job now holds exactly this transcript's output files. Deliver a
+          # copy to the NAS, one folder per transcript (best-effort: the share
+          # is an automounted CIFS mount that may be offline — never fail the
+          # job over it, the local $OUT copy is kept and can be re-synced).
+          dest=$NAS/$outstem
+          if mkdir -p "$dest" 2>/dev/null && cp -f "$job"/* "$dest"/ 2>/dev/null; then
+            echo "delivered: $name -> $dest/"
+          else
+            echo "WARN: NAS delivery to $dest failed (share offline?) — local copy kept in $OUT"
+          fi
           find "$job" -mindepth 1 -maxdepth 1 -exec mv -t "$OUT" {} +
           rmdir "$job"
           echo "done: $name -> $OUT/$outstem.*"

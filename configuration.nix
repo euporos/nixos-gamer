@@ -62,6 +62,34 @@
     allowedTCPPorts = [ 22 ];
   };
 
+  # --- Storage: NAS (CIFS) --------------------------------------------------
+  # Mount //192.168.85.50/Netspace the same way nas-nixos does (cifs,
+  # credentials at /etc/nixos/secrets/smb-secrets — a username=/password= file
+  # that is NOT in the repo; place it out of band like the whisper HF token,
+  # mode 600). This is the delivery target for finished transcripts: whisper.nix
+  # writes one folder per transcript under artifacts/transcriptions/.
+  #
+  # Deviation from nas-nixos, on purpose: nofail + x-systemd.automount. This box
+  # is headless and off most of the time (WoL), so a NAS that is unreachable at
+  # boot must never delay or fail the boot — see the boot-resilience rules
+  # above. automount mounts the share lazily on first access (when the worker
+  # writes a result), never eagerly at boot; nofail keeps a mount failure
+  # non-fatal. cifs-utils provides the mount.cifs helper systemd needs.
+  fileSystems."/media/NAS/Netspace" = {
+    device = "//192.168.85.50/Netspace";
+    fsType = "cifs";
+    options = [
+      "nofail"
+      "x-systemd.automount"
+      "x-systemd.idle-timeout=60"
+      "x-systemd.device-timeout=30s"
+      "x-systemd.mount-timeout=30s"
+      "credentials=/etc/nixos/secrets/smb-secrets"
+      "uid=1000"
+      "gid=100"
+    ];
+  };
+
   # --- Locale / time --------------------------------------------------------
   time.timeZone = "Europe/Berlin";
   i18n.defaultLocale = "en_US.UTF-8";
@@ -132,6 +160,7 @@
     htop
     file
     jq
+    cifs-utils   # mount.cifs helper for the NAS mount above
   ];
 
   # --- Nix ------------------------------------------------------------------

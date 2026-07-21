@@ -102,6 +102,17 @@ but **cannot pick the OS** — the magic packet only says "power on". The flow:
 - Results in `/srv/whisper/transcripts/` (`.txt/.srt/.vtt/.tsv/.json` +
   jq-generated `.speakers.txt`); audio → `processed/`, failures → `failed/`
   (requeue = move back to inbox). Logs: `journalctl -u whisper-worker`.
+- **NAS delivery**: on success the worker also copies the output set into
+  `/media/NAS/Netspace/artifacts/transcriptions/<stem>/` — one folder per
+  transcript. The local `/srv/whisper/transcripts/` (flat) stays the source of
+  truth the web UI browses/polls; the NAS copy is the shareable deliverable.
+  Delivery is **best-effort**: the share is an automounted CIFS mount (`nofail`
+  + `x-systemd.automount`, `configuration.nix`) so an offline NAS only logs a
+  `WARN` and never fails a job — the local copy is retained and can be
+  re-synced. Requires the CIFS credentials file at
+  `/etc/nixos/secrets/smb-secrets` (`username=`/`password=`, mode 600) — a
+  secret placed out of band like the HF token, **not** in the repo; until it
+  exists the mount can't authenticate and delivery just WARNs.
 - The container user is uid 1001 == host user `whisper` (fixed uid, on
   purpose — bind-mounted job dirs rely on it).
 - The image's whisperx downloads its VAD model from a **dead S3 bucket**; the
