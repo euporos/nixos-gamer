@@ -375,14 +375,21 @@ in
       # so nginx serves them.
       DynamicUser = true;
       SupplementaryGroups = [ "whisper" ];
-      # NOT "strict": we write summaries under /srv/whisper/transcripts and copy
-      # them to the automounted NAS under /media. "strict" would make both
-      # read-only, and whitelisting the NAS via ReadWritePaths would force the
-      # autofs mount at *service start* — hanging/failing when the NAS is offline,
-      # exactly what the box's nofail+automount design avoids. "true" keeps /usr
-      # and /boot read-only while leaving /srv and /media writable, and the NAS
-      # still mounts lazily on first write.
-      ProtectSystem = "true";
+      # DynamicUser=yes forces the whole filesystem read-only — it behaves like
+      # ProtectSystem=strict, and (verified on the box) a *lower* ProtectSystem=
+      # does NOT override that under DynamicUser. So loosening the CIFS mount is
+      # necessary but NOT sufficient: the only way to let this service persist a
+      # summary is to poke explicit write holes with ReadWritePaths:
+      #   - the local transcript dir — the essential path, always present;
+      #   - the NAS delivery dir, "-"-prefixed so an offline/unmounted share at
+      #     service start is non-fatal (delivery is best-effort; the local copy
+      #     is the source of truth). It's an automount, so it only actually
+      #     mounts when we write to it.
+      ProtectSystem = "strict";
+      ReadWritePaths = [
+        "/srv/whisper/transcripts"
+        "-/media/NAS/Netspace/artifacts/transcriptions"
+      ];
       ProtectHome = true;
       PrivateTmp = true;
       NoNewPrivileges = true;

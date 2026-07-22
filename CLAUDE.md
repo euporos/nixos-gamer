@@ -226,14 +226,18 @@ llama.cpp CUDA kernels; the Pascal fix is the `cudaCapabilities` pin above.
   IO), and on any write failure the summary is still returned (`save_error`) so
   it's never lost. Each saved summary is then best-effort copied to the NAS
   `<stem>/` folder in a daemon thread (never delays the response; NAS offline
-  just logs). This is why the CIFS mount is loosened to `dir_mode=0777`/
-  `file_mode=0666` (`configuration.nix`) — the summarizer is a `DynamicUser`,
-  not root, and must write there too. The service runs `ProtectSystem="true"`
-  (not `strict`): `strict` would make `/srv` and `/media` read-only, and
-  whitelisting the automounted NAS via `ReadWritePaths` would force the autofs
-  mount at *service start* — hanging/failing when the NAS is offline, defeating
-  the box's `nofail`+automount design. `"true"` keeps `/usr`+`/boot` read-only
-  while leaving both writable, and the NAS still mounts lazily on first write.
+  just logs). **Two things are needed for those writes** (both verified on the
+  box): (1) the CIFS mount is loosened to `dir_mode=0777`/`file_mode=0666`
+  (`configuration.nix`) because the summarizer is a non-root `DynamicUser`; and
+  (2) `ReadWritePaths = [ "/srv/whisper/transcripts"
+  "-/media/NAS/Netspace/artifacts/transcriptions" ]` on the unit. The second is
+  the non-obvious one: **`DynamicUser=yes` forces the entire filesystem
+  read-only** (it behaves like `ProtectSystem=strict`, and a *lower*
+  `ProtectSystem=` does NOT override that under DynamicUser — tested), so loose
+  mount perms alone are useless; only `ReadWritePaths` opens a write hole. The
+  NAS entry is **`-`-prefixed** so an offline/unmounted share at service start
+  is non-fatal — the local `<stem>.summary*.md` is always the source of truth,
+  and the automount only actually mounts when a summary is written.
 - The server sends `think:false` (Qwen3 is a thinking model) and strips any
   stray `<think>…</think>` defensively, for clean, fast summaries.
 - **VRAM (11 GB, shared with whisper) — GPU lock**: Qwen3-14B weights are ~9 GB
