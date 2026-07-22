@@ -4,6 +4,7 @@
   imports = [
     ./hardware-configuration.nix
     ./nvidia.nix
+    ./disk-spindown.nix
     ./whisper.nix
     ./summarize.nix
     ./sops.nix

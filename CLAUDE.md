@@ -282,6 +282,27 @@ llama.cpp CUDA kernels; the Pascal fix is the `cudaCapabilities` pin above.
   gets silently truncated. The archive is not re-rendered while a prompt
   textarea is focused, so polling never eats the user's keystrokes.
 
+## Electricity / idle power (`disk-spindown.nix`)
+
+This is an old Zen1 gaming tower (Ryzen 5 1600X + GTX 1080 Ti + 32GB), a
+*high-idle* platform: estimated wall idle ~95-120W (no wall meter yet — AMD
+Zen1 RAPL is unreliable, so this is a component budget, not a measurement). At
+~€0.35/kWh that's ~€275-370/yr running 24/7 — roughly €180-250/yr *more* than a
+purpose-built low-power NAS. Known idle contributors: 1080 Ti ~17W in P8
+(measured; Pascal won't idle lower — the standing cost of keeping the card
+warm for whisper/ollama), and the spinning HDDs below.
+
+- **HDD spindown**: NixOS only uses the NVMe (ext4 root + ESP). The three
+  *rotational* disks (2× internal SATA Windows-NTFS + 1 USB exfat) are never
+  mounted/polled by Linux, so `disk-spindown.nix` runs **hd-idle** to park them
+  after 10 min idle. Nothing wakes them (no smartd, no udisks2), so they spin
+  down once after boot and stay down. Matching is **by-id only** — kernel
+  letters (sdb/sdc…) reshuffle between boots here, even between SSH sessions.
+  Default `scsi` STOP-UNIT parks the internal SATA disks (verified); USB is
+  best-effort. Swapping a disk ⇒ update the `spinDisks` ids.
+- To get a real number, plug the box into a smart plug (Shelly/Kasa/Fritz!DECT)
+  and read idle vs. whisper-job draw — turns the estimate above into fact.
+
 ## Gotchas
 
 - First switch after enabling a kernel-module change (e.g. the NVIDIA driver)
