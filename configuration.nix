@@ -5,6 +5,7 @@
     ./hardware-configuration.nix
     ./nvidia.nix
     ./whisper.nix
+    ./summarize.nix
     ./sops.nix
   ];
 

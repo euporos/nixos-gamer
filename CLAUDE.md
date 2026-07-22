@@ -28,6 +28,16 @@ from a machine without that alias needs it added first.
     This is why the WhisperX container image in `whisper.nix` is pinned to a
     2024 build (torch 2.1.1). Do not bump it to a floating tag.
   - No usable fp16 on Pascal; CTranslate2/faster-whisper runs `int8` (dp4a).
+  - **Ollama (summarization) has the same sm_61 trap** — but a different fix.
+    This nixpkgs' default `cudaCapabilities` is `7.5 8.0 … 12.1` (it OMITS
+    `6.1`), so a stock `ollama-cuda` would ship with no Pascal kernels and die
+    identically with "no kernel image is available". The default CUDA here is
+    **12.9, which still supports Pascal**, so the fix is simply forcing the arch:
+    `nixpkgs.config.cudaCapabilities = [ "6.1" ]` in `summarize.nix` (only
+    ollama is CUDA-built, so scoping to this one GPU is correct). This compiles
+    ollama-cuda from source for sm_61 (not in the binary cache — a one-time
+    remote build). Do **not** let the default CUDA float to 13.x — CUDA 13
+    dropped Pascal at the compiler level, so 6.1 would no longer even build.
 - **The ESP is a tiny 96MB Windows-created partition** (`nvme0n1p1`, mounted at
   `/boot/efi`) shared with the Microsoft bootloader (~27MB). It is boxed in
   between the disk start and the Windows partitions, so it **cannot be grown**.
@@ -182,6 +192,41 @@ This replaced the old hand-placed plaintext files
   2026-07-19 (now carried in `secrets/secrets.yaml`) — diarization active.
 - nginx runs under `ProtectSystem=strict`; the inbox is whitelisted via
   `ReadWritePaths`. New writable paths for nginx need the same treatment.
+
+## Summarization pipeline (`summarize.nix`)
+
+Summarize a transcript via a local **Ollama running Qwen3 14B** (GGUF Q4) on the
+1080 Ti. Unlike WhisperX this is not a PyTorch problem — Ollama ships its own
+llama.cpp CUDA kernels; the Pascal fix is the `cudaCapabilities` pin above.
+
+- **Endpoint**: `POST http://192.168.85.30:8990/summarize` — an nginx `= /`
+  exact-match location that proxies to a small stdlib-Python server on
+  `127.0.0.1:8991` (`whisper-summarize.service`, `DynamicUser` in the `whisper`
+  group). The location is defined in `summarize.nix` but **merges into the
+  `whisper` vhost declared in `whisper.nix`** (NixOS merges `locations` across
+  modules); exact-match beats the `/` PUT-inbox catch-all, so uploads are
+  unaffected. Port 8991 is never firewalled — only 8990 (nginx) is public.
+- **Request** (JSON): `text` (inline transcript) **or** `file` (a bare name
+  resolved under `/srv/whisper/transcripts`, or an absolute path that must
+  canonicalize *inside* that dir — traversal/symlink-out is rejected), plus
+  optional `prompt` (extra instructions, appended to the base summarizer
+  system prompt), `language`, `model`, `num_ctx`, `temperature`, `keep_alive`.
+  A raw (non-JSON) body is taken verbatim as the transcript; extra instructions
+  then come from the `X-Summarize-Prompt` header. Response: `{"summary","model"}`.
+- The server sends `think:false` (Qwen3 is a thinking model) and strips any
+  stray `<think>…</think>` defensively, for clean, fast summaries.
+- **VRAM (11 GB, shared with whisper)**: Qwen3-14B weights are ~9 GB.
+  `OLLAMA_KEEP_ALIVE=0` (service env, per-request overridable) unloads the model
+  right after each summary so it doesn't sit on VRAM the **10-min whisper sweep**
+  needs. This shrinks but does not eliminate the collision window — a summary
+  running exactly when a whisper job starts can still contend. Real GPU mutual
+  exclusion between the two is deferred until this is wired into the UI.
+- **Model provisioning**: `services.ollama.loadModels = [ "qwen3:14b" ]` pulls
+  the model via a separate oneshot (`ollama-model-loader`) after ollama starts —
+  it does not block the switch. First deploy: the model isn't ready until that
+  pull finishes (~9 GB download); `journalctl -u ollama-model-loader` to watch.
+- Only the endpoint exists so far — **no UI integration yet** (planned: quick
+  "summarize" links from the whisper transcript browser).
 
 ## Gotchas
 
