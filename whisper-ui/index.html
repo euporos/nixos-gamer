@@ -305,7 +305,7 @@ const SUMMARY_RE = /^(.+)\.summary(?:\.(\d+))?\.md$/;
 // must match SUMMARIZE_NUM_CTX in summarize.nix — used only to warn (client-side,
 // ~4 chars/token) when a transcript likely overflows the context and gets
 // silently truncated by Ollama
-const SUMMARIZE_NUM_CTX = 8192;
+const SUMMARIZE_NUM_CTX = 16384;
 // seconds of fixed overhead (container start + model load) added to the ETA
 const ETA_OVERHEAD_S = 90, RT_FACTOR = 15;
 
