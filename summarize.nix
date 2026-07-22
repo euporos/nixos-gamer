@@ -22,7 +22,17 @@
 #                                                #   (default: same as transcript)
 #     "model":      "qwen3:14b",                 # optional override
 #     "num_ctx":    8192,                        # optional override
-#     "temperature": 0.3                         # optional override
+#     "temperature": 0.3,                        # optional override
+#     "save":       "meeting"                    # optional: ALSO persist the
+#                                                #   summary next to the transcript
+#                                                #   as <stem>.summary[.N].md (stem
+#                                                #   = a bare transcript name — same
+#                                                #   path safety as "file", no
+#                                                #   traversal). Numbered .2/.3/...
+#                                                #   when earlier summaries exist,
+#                                                #   and best-effort copied to the
+#                                                #   NAS <stem>/ folder like the
+#                                                #   transcripts. ("stem" alias ok)
 #   }
 # One of "text"/"file" is required. A raw (non-JSON) body is taken verbatim as
 # the transcript, with extra instructions via the X-Summarize-Prompt header:
@@ -35,6 +45,9 @@
 #        http://192.168.85.30:8990/summarize
 #
 # Response: {"summary": "...", "model": "qwen3:14b"}  (HTTP 200)
+#           + "file": "meeting.summary.md"   when "save" was given and persisted
+#           + "save_error": "..."            when "save" was given but the write
+#                                            failed (the summary is still returned)
 #           {"error": "..."}                          (4xx/5xx)
 #
 # VRAM (11 GB, shared with whisper): the Qwen3-14B weights are ~9 GB, and a
@@ -51,12 +64,16 @@ let
   # Pure-stdlib HTTP server: builds the prompt, calls Ollama /api/chat, returns
   # the summary. Reads its config from the environment (set in the unit below).
   server = pkgs.writeText "whisper-summarize.py" ''
-    import fcntl, json, os, re, sys, time, urllib.request, urllib.error
+    import fcntl, json, os, re, sys, threading, time, urllib.request, urllib.error
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     OLLAMA       = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
     MODEL        = os.environ.get("SUMMARIZE_MODEL", "qwen3:14b")
     ROOT         = os.path.realpath(os.environ.get("TRANSCRIPT_ROOT", "/srv/whisper/transcripts"))
+    # Best-effort NAS delivery target (one folder per transcript), mirroring the
+    # whisper worker. Automounted CIFS (may be offline) — delivery is fire-and-
+    # forget in a background thread and never affects the response. Empty = off.
+    NAS_ROOT     = os.environ.get("SUMMARIZE_NAS_ROOT", "")
     NUM_CTX      = int(os.environ.get("SUMMARIZE_NUM_CTX", "8192"))
     TEMPERATURE  = float(os.environ.get("SUMMARIZE_TEMPERATURE", "0.3"))
     PORT         = int(os.environ.get("SUMMARIZE_PORT", "8991"))
@@ -91,6 +108,56 @@ let
         if not os.path.isfile(cand):
             raise ValueError("no such transcript file")
         return cand
+
+    def save_summary(stem, text):
+        # Persist the summary next to the transcript as <stem>.summary[.N].md.
+        # Same path safety as resolve_file: <stem> must be a bare name whose
+        # target canonicalizes to a direct child of ROOT — no slashes, no
+        # traversal, no symlink-out. Numbering is race-free (O_EXCL): the first
+        # summary is <stem>.summary.md, the next free <stem>.summary.<N>.md.
+        if os.path.basename(stem) != stem or stem in ("", ".", ".."):
+            raise ValueError("invalid stem for save")
+        for n in range(1, 1000):
+            name = stem + ".summary.md" if n == 1 else "%s.summary.%d.md" % (stem, n)
+            path = os.path.join(ROOT, name)
+            if os.path.dirname(os.path.realpath(path)) != ROOT:
+                raise ValueError("summary path is outside the transcript directory")
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o664)
+            except FileExistsError:
+                continue
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(text)
+            except Exception:
+                try:
+                    os.unlink(path)  # don't leave an empty reserved file behind
+                except OSError:
+                    pass
+                raise
+            return name
+        raise ValueError("too many summaries for this transcript")
+
+    def deliver_nas(stem, name, text):
+        # Copy the just-saved summary to the NAS <stem>/ folder, like the whisper
+        # worker delivers transcripts. Best-effort: the share is an automounted
+        # CIFS mount that may be offline (mkdir/write then just error out after
+        # the mount timeout) — run in a daemon thread so the response is never
+        # delayed, and swallow every error (the local copy is the source of
+        # truth). Write to a .tmp then atomic-rename so a poller never sees a
+        # half-written file.
+        if not NAS_ROOT:
+            return
+        try:
+            dest = os.path.join(NAS_ROOT, stem)
+            os.makedirs(dest, exist_ok=True)
+            tmp = os.path.join(dest, name + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, os.path.join(dest, name))
+            sys.stderr.write("summarize: delivered %s -> %s/\n" % (name, dest))
+        except Exception as e:  # noqa: BLE001 — best-effort, local copy is kept
+            sys.stderr.write("summarize: NAS delivery of %s failed: %r\n" % (name, e))
 
     def build_messages(transcript, prompt, language):
         system = BASE_SYSTEM
@@ -183,7 +250,23 @@ let
             os.close(lock_fd)
 
         summary = THINK_RE.sub("", out["message"]["content"]).strip()
-        return {"summary": summary, "model": model}
+        result = {"summary": summary, "model": model}
+
+        # Optional persistence (lock already released — this is pure IO). "save"
+        # or its alias "stem" is a bare transcript name; on any failure keep the
+        # summary in the response so the client never loses it.
+        stem = req.get("save") or req.get("stem")
+        if isinstance(stem, str) and stem.strip():
+            try:
+                name = save_summary(stem.strip(), summary)
+                result["file"] = name
+                threading.Thread(target=deliver_nas,
+                                 args=(stem.strip(), name, summary),
+                                 daemon=True).start()
+            except Exception as e:  # noqa: BLE001 — report, but don't drop the summary
+                result["save_error"] = str(e)
+
+        return result
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -267,17 +350,29 @@ in
       SUMMARIZE_NUM_CTX = "8192";
       GPU_LOCK = "/run/whisper-gpu.lock";
       SUMMARIZE_LOCK_TIMEOUT = "900";
+      # Best-effort NAS delivery of saved summaries, one folder per transcript —
+      # same target the whisper worker uses. The CIFS mount is loosened
+      # (dir_mode/file_mode, configuration.nix) so this DynamicUser can write.
+      SUMMARIZE_NAS_ROOT = "/media/NAS/Netspace/artifacts/transcriptions";
     };
     serviceConfig = {
       ExecStart = "${pkgs.python3}/bin/python3 ${server}";
       Restart = "on-failure";
       RestartSec = 2;
       # Least privilege: no dedicated user needed. Read access to the transcript
-      # dir comes from the whisper group (files there are group/world readable).
+      # dir comes from the whisper group (files there are group/world readable);
+      # the setgid transcripts dir (2775) makes summaries we create group-whisper
+      # so nginx serves them.
       DynamicUser = true;
       SupplementaryGroups = [ "whisper" ];
-      # Talks only to localhost:11434 and reads only transcripts — lock it down.
-      ProtectSystem = "strict";
+      # NOT "strict": we write summaries under /srv/whisper/transcripts and copy
+      # them to the automounted NAS under /media. "strict" would make both
+      # read-only, and whitelisting the NAS via ReadWritePaths would force the
+      # autofs mount at *service start* — hanging/failing when the NAS is offline,
+      # exactly what the box's nofail+automount design avoids. "true" keeps /usr
+      # and /boot read-only while leaving /srv and /media writable, and the NAS
+      # still mounts lazily on first write.
+      ProtectSystem = "true";
       ProtectHome = true;
       PrivateTmp = true;
       NoNewPrivileges = true;

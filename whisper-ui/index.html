@@ -193,6 +193,45 @@
     border:1px solid var(--line);padding:1px 7px;
   }
   .exts a:hover{color:var(--amber-hi);border-color:var(--amber)}
+  .rec-item .actions{display:flex;gap:8px;flex:none}
+  button.sum-btn:hover{border-color:var(--amber);color:var(--amber-hi)}
+  button.sum-btn:disabled{opacity:.6;cursor:progress;border-color:var(--line);color:var(--dim)}
+
+  /* ---------- summaries ---------- */
+  textarea.sum-extra{
+    display:block;width:100%;margin-top:10px;padding:9px 11px;resize:vertical;
+    font-family:inherit;font-size:12px;line-height:1.5;
+    color:var(--ink);background:var(--bg);border:1px solid var(--faint);
+  }
+  textarea.sum-extra::placeholder{color:var(--faint)}
+  textarea.sum-extra:focus-visible{outline:1px solid var(--amber-hi);outline-offset:2px;border-color:var(--amber)}
+  .sums{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px}
+  .sums .lbl{
+    color:var(--faint);font-size:10px;letter-spacing:.2em;text-transform:uppercase;
+  }
+  .sum-chip{display:inline-flex;border:1px solid var(--line)}
+  .sum-chip button{border:none;border-right:1px solid var(--line);padding:2px 9px}
+  .sum-chip button:hover{border-color:var(--line);color:var(--amber-hi)}
+  .sum-chip a{
+    color:var(--dim);text-decoration:none;font-size:11px;letter-spacing:.1em;
+    padding:2px 8px;display:inline-flex;align-items:center;
+  }
+  .sum-chip a:hover{color:var(--amber-hi)}
+  .sum-warn{
+    margin-top:8px;color:var(--amber-hi);font-size:11px;letter-spacing:.03em;
+    border-left:2px solid var(--amber);padding:2px 0 2px 9px;
+  }
+  .sum-err{
+    margin-top:8px;color:var(--red);font-size:11px;letter-spacing:.03em;
+    border-left:2px solid var(--red);padding:2px 0 2px 9px;
+  }
+  pre.summary{
+    margin-top:8px;padding:12px;background:var(--panel2);border:1px solid var(--line);
+    border-left:3px solid var(--amber);
+    white-space:pre-wrap;word-break:break-word;max-height:340px;overflow:auto;
+    font-size:12px;color:var(--ink);
+  }
+  pre.summary .n{color:var(--amber-hi);font-weight:700}
   pre.preview{
     margin-top:10px;padding:12px;background:var(--panel);border:1px solid var(--line);
     white-space:pre-wrap;word-break:break-word;max-height:340px;overflow:auto;
@@ -261,6 +300,12 @@
 const POLL_MS = 4000;
 const TRANSCRIPT_EXTS = ['speakers.txt','json','srt','tsv','txt','vtt'];
 const EXT_ORDER = ['speakers.txt','txt','srt','vtt','tsv','json'];
+// summaries persist as <stem>.summary.md, <stem>.summary.2.md, ... (see summarize.nix)
+const SUMMARY_RE = /^(.+)\.summary(?:\.(\d+))?\.md$/;
+// must match SUMMARIZE_NUM_CTX in summarize.nix — used only to warn (client-side,
+// ~4 chars/token) when a transcript likely overflows the context and gets
+// silently truncated by Ollama
+const SUMMARIZE_NUM_CTX = 8192;
 // seconds of fixed overhead (container start + model load) added to the ETA
 const ETA_OVERHEAD_S = 90, RT_FACTOR = 15;
 
@@ -273,8 +318,15 @@ const meta = JSON.parse(localStorage.getItem('whisperui') || '{}');
 const saveMeta = () => localStorage.setItem('whisperui', JSON.stringify(meta));
 const uploads = {};            // name -> {pct, error}
 let server = {inbox:[], working:[], failed:[], transcripts:[], ok:false};
-const expanded = new Set();    // stems with open preview
-const previews = {};           // stem -> {text} | {error} | {loading:true}
+const expanded = new Set();    // stems (transcript preview) + summary filenames, open
+const previews = {};           // stem | summary-filename -> {text} | {error} | {loading}
+// per-transcript summarization extras, survives reloads (own key so pruneMeta,
+// which only tracks in-flight jobs, never drops it)
+const prompts = JSON.parse(localStorage.getItem('whisperprompts') || '{}');
+const savePrompts = () => localStorage.setItem('whisperprompts', JSON.stringify(prompts));
+const promptOpen = new Set();  // stems whose extra-prompt textarea is shown
+const summarizing = new Set(); // stems with an in-flight /summarize request
+const summaryErr = {};         // stem -> last error string (503 / failure)
 
 /* ---------- helpers ---------- */
 const $ = sel => document.querySelector(sel);
@@ -284,6 +336,11 @@ const isTranscript = n => TRANSCRIPT_EXTS.some(x => n.endsWith('.' + x));
 const transcriptStem = n => {
   const ext = TRANSCRIPT_EXTS.find(x => n.endsWith('.' + x));
   return ext ? n.slice(0, -(ext.length + 1)) : null;
+};
+// a summary file belongs to <stem> (like .speakers.txt does) — never its own group
+const summaryInfo = n => {
+  const m = SUMMARY_RE.exec(n);
+  return m ? {stem: m[1], n: m[2] ? parseInt(m[2], 10) : 1} : null;
 };
 const fmtSize = b => b >= 1048576 ? (b/1048576).toFixed(1)+' MB'
                    : b >= 1024    ? (b/1024).toFixed(0)+' KB' : b+' B';
@@ -353,18 +410,39 @@ function jobList(){
 
 function archiveGroups(){
   const g = {};
+  const ensure = stem => g[stem] ||
+    (g[stem] = {stem, exts:[], summaries:[], mtime:0, speakersBytes:0, txtBytes:0});
   for(const f of server.transcripts.filter(e => e.type === 'file')){
+    // summaries attach to their transcript's group rather than forming one
+    const s = summaryInfo(f.name);
+    if(s){
+      const grp = ensure(s.stem);
+      grp.summaries.push({name: f.name, n: s.n, mtime: Date.parse(f.mtime)});
+      grp.mtime = Math.max(grp.mtime, Date.parse(f.mtime));
+      continue;
+    }
     const stem = transcriptStem(f.name);
     if(stem === null) continue;
     const ext = f.name.slice(stem.length + 1);
-    (g[stem] || (g[stem] = {stem, exts:[], mtime:0}));
-    g[stem].exts.push(ext);
-    g[stem].mtime = Math.max(g[stem].mtime, Date.parse(f.mtime));
+    const grp = ensure(stem);
+    grp.exts.push(ext);
+    grp.mtime = Math.max(grp.mtime, Date.parse(f.mtime));
+    // remember the size of the text we'd send to /summarize, to estimate tokens
+    if(ext === 'speakers.txt') grp.speakersBytes = f.size || 0;
+    else if(ext === 'txt')     grp.txtBytes = f.size || 0;
   }
-  for(const v of Object.values(g))
+  for(const v of Object.values(g)){
     v.exts.sort((a,b) => EXT_ORDER.indexOf(a) - EXT_ORDER.indexOf(b));
+    v.summaries.sort((a,b) => a.n - b.n);
+  }
   return Object.values(g).sort((a,b) => b.mtime - a.mtime);
 }
+
+// the file /summarize will read: prefer the speaker-labelled transcript
+const summarizeSource = g =>
+  g.exts.includes('speakers.txt') ? g.stem + '.speakers.txt' : g.stem + '.txt';
+// rough token estimate (~4 chars/token) of that file, for the overflow warning
+const estTokens = g => Math.round((g.speakersBytes || g.txtBytes || 0) / 4);
 
 /* ---------- rendering ---------- */
 function render(){
@@ -406,31 +484,78 @@ function render(){
   }).join('') : '<div class="empty">nothing queued, nothing running</div>';
 
   const groups = archiveGroups();
-  $('#archive').innerHTML = groups.length ? groups.map(g => {
-    const fresh = Date.now() - g.mtime < 10 * 60 * 1000;
-    const links = g.exts.map(ext =>
-      `<a href="/transcripts/${encodeURIComponent(g.stem + '.' + ext)}" download>.${ext}</a>`).join('');
-    const p = previews[g.stem];
-    const body = !expanded.has(g.stem) ? ''
-      : p && p.text  ? `<pre class="preview">${highlightSpeakers(p.text)}</pre>`
-      : p && p.error ? `<pre class="preview">could not load preview: ${esc(p.error)}</pre>`
-      : `<pre class="preview">loading…</pre>`;
-    return `<div class="rec-item${fresh ? ' fresh' : ''}">
-      <div class="row">
-        <span class="stem">${esc(g.stem)}</span>
-        <span class="when">${fmtWhen(g.mtime)}</span>
-        <span class="spacer"></span>
-        <button class="preview-btn" data-action="toggle" data-name="${esc(g.stem)}">
-          ${expanded.has(g.stem) ? 'hide' : 'view'}</button>
-      </div>
-      <div class="exts">${links}</div>
-      ${body}
-    </div>`;
-  }).join('') : (server.ok
-      ? '<div class="empty">no transcripts yet</div>'
-      : '<div class="empty">server unreachable</div>');
+  // Don't rebuild the archive while a prompt textarea is focused — replacing
+  // innerHTML would drop the caret. The text is saved to `prompts` on input, so
+  // a later rebuild (new transcript, toggle, summarize) restores it intact.
+  const ae = document.activeElement;
+  const editing = ae && ae.tagName === 'TEXTAREA' && $('#archive').contains(ae);
+  if(!editing){
+    $('#archive').innerHTML = groups.length ? groups.map(renderGroup).join('')
+      : (server.ok ? '<div class="empty">no transcripts yet</div>'
+                   : '<div class="empty">server unreachable</div>');
+  }
 
   tick();
+}
+
+function renderGroup(g){
+  const fresh = Date.now() - g.mtime < 10 * 60 * 1000;
+  const busy = summarizing.has(g.stem);
+  const links = g.exts.map(ext =>
+    `<a href="/transcripts/${encodeURIComponent(g.stem + '.' + ext)}" download>.${ext}</a>`).join('');
+
+  // transcript preview
+  const p = previews[g.stem];
+  const preview = !expanded.has(g.stem) ? ''
+    : p && p.text  ? `<pre class="preview">${highlightSpeakers(p.text)}</pre>`
+    : p && p.error ? `<pre class="preview">could not load preview: ${esc(p.error)}</pre>`
+    : `<pre class="preview">loading…</pre>`;
+
+  // existing summaries: numbered view/download chips + inline preview of open ones
+  const sums = g.summaries.length ? `<div class="sums">
+      <span class="lbl">summaries</span>
+      ${g.summaries.map(s => `<span class="sum-chip"><button data-action="toggle-summary" data-file="${esc(s.name)}">#${s.n} ${expanded.has(s.name) ? 'hide' : 'view'}</button><a href="/transcripts/${encodeURIComponent(s.name)}" download>.md</a></span>`).join('')}
+    </div>` : '';
+  const sumPreviews = g.summaries.filter(s => expanded.has(s.name)).map(s => {
+    const q = previews[s.name];
+    const inner = q && q.text  ? `<span class="n">#${s.n}</span>\n${esc(q.text)}`
+                : q && q.error ? `could not load summary #${s.n}: ${esc(q.error)}`
+                : `loading summary #${s.n}…`;
+    return `<pre class="summary">${inner}</pre>`;
+  }).join('');
+
+  // collapsible per-transcript extra-prompt textarea
+  const promptBox = promptOpen.has(g.stem)
+    ? `<textarea class="sum-extra" data-stem="${esc(g.stem)}" rows="3" placeholder="extra summarizer instructions — e.g. 'focus on decisions & action items', 'in English', 'three bullet points'">${esc(prompts[g.stem] || '')}</textarea>`
+    : '';
+
+  // truncation warning (rough client-side estimate) + last error
+  const tok = estTokens(g);
+  const warn = tok > SUMMARIZE_NUM_CTX
+    ? `<div class="sum-warn">~${tok.toLocaleString()} tokens — likely over the ${SUMMARIZE_NUM_CTX.toLocaleString()}-token context; the summary may be truncated.</div>`
+    : '';
+  const err = summaryErr[g.stem]
+    ? `<div class="sum-err">${esc(summaryErr[g.stem])}</div>` : '';
+
+  return `<div class="rec-item${fresh ? ' fresh' : ''}">
+    <div class="row">
+      <span class="stem">${esc(g.stem)}</span>
+      <span class="when">${fmtWhen(g.mtime)}</span>
+      <span class="spacer"></span>
+      <div class="actions">
+        <button class="preview-btn" data-action="toggle" data-name="${esc(g.stem)}">${expanded.has(g.stem) ? 'hide' : 'view'}</button>
+        <button class="sum-btn" data-action="prompt" data-name="${esc(g.stem)}">${promptOpen.has(g.stem) ? '- prompt' : '+ prompt'}</button>
+        <button class="sum-btn" data-action="summarize" data-name="${esc(g.stem)}"${busy ? ' disabled' : ''}>${busy ? 'summarizing…' : 'summarize'}</button>
+      </div>
+    </div>
+    <div class="exts">${links}</div>
+    ${promptBox}
+    ${warn}
+    ${err}
+    ${preview}
+    ${sums}
+    ${sumPreviews}
+  </div>`;
 }
 
 const highlightSpeakers = text =>
@@ -469,8 +594,74 @@ document.addEventListener('click', async ev => {
       if(!previews[name]) loadPreview(name);
     }
     render();
+  }else if(action === 'toggle-summary'){
+    const file = btn.dataset.file;
+    if(expanded.has(file)){ expanded.delete(file); }
+    else{
+      expanded.add(file);
+      if(!previews[file]) loadSummary(file);
+    }
+    render();
+  }else if(action === 'prompt'){
+    if(promptOpen.has(name)) promptOpen.delete(name); else promptOpen.add(name);
+    render();
+  }else if(action === 'summarize'){
+    summarize(name);
   }
 });
+
+// keep the per-transcript extra-prompt text as it is typed (survives reloads)
+document.addEventListener('input', ev => {
+  const ta = ev.target.closest('textarea[data-stem]');
+  if(!ta) return;
+  prompts[ta.dataset.stem] = ta.value;
+  savePrompts();
+});
+
+async function summarize(stem){
+  if(summarizing.has(stem)) return;
+  // prefer the speaker-labelled transcript, else the plain .txt
+  const hasSpk = server.transcripts.some(f => f.type === 'file' && f.name === stem + '.speakers.txt');
+  const file = hasSpk ? stem + '.speakers.txt' : stem + '.txt';
+  summarizing.add(stem); delete summaryErr[stem]; render();
+  try{
+    const r = await fetch('/summarize', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({file, prompt: prompts[stem] || '', save: stem}),
+    });
+    let data = {};
+    try{ data = await r.json(); }catch(e){}
+    if(!r.ok){
+      summaryErr[stem] = r.status === 503
+        ? (data.error || 'GPU busy with transcription — try again shortly') + ' (retry)'
+        : (data.error || ('summarize failed — HTTP ' + r.status));
+      return;
+    }
+    if(data.save_error) summaryErr[stem] = 'summary shown but not saved: ' + data.save_error;
+    // pre-seed the preview so the new summary shows instantly; the file itself
+    // appears as a chip on the next poll
+    if(data.file && typeof data.summary === 'string'){
+      previews[data.file] = {text: data.summary};
+      expanded.add(data.file);
+    }
+  }catch(e){
+    summaryErr[stem] = 'summarize failed — ' + (e.message || 'network error');
+  }finally{
+    summarizing.delete(stem);
+    poll();   // refresh the listing so the saved summary chip appears
+  }
+}
+
+async function loadSummary(file){
+  previews[file] = {loading:true};
+  try{
+    const r = await fetch('/transcripts/' + encodeURIComponent(file), {cache:'no-store'});
+    if(r.ok) previews[file] = {text: await r.text()};
+    else previews[file] = {error: 'HTTP ' + r.status};
+  }catch(e){ previews[file] = {error: e.message || 'network error'}; }
+  render();
+}
 
 const control = (name, verb) =>
   fetch('/control/' + encodeURIComponent(name + '.' + verb), {method:'PUT', body:''});

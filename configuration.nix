@@ -70,7 +70,8 @@
   # the repo by sops-nix (see sops.nix) to /run/secrets/smb-secrets at
   # activation — no longer hand-placed at /etc/nixos/secrets/smb-secrets. This
   # is the delivery target for finished transcripts: whisper.nix writes one
-  # folder per transcript under artifacts/transcriptions/.
+  # folder per transcript under artifacts/transcriptions/, and the summarizer
+  # (summarize.nix) writes <stem>.summary*.md into the same folders.
   #
   # Deviation from nas-nixos, on purpose: nofail + x-systemd.automount. This box
   # is headless and off most of the time (WoL), so a NAS that is unreachable at
@@ -78,6 +79,13 @@
   # above. automount mounts the share lazily on first access (when the worker
   # writes a result), never eagerly at boot; nofail keeps a mount failure
   # non-fatal. cifs-utils provides the mount.cifs helper systemd needs.
+  #
+  # dir_mode=0777/file_mode=0666: permit any local user to write, not just the
+  # mount-owner uid=1000. The whisper worker runs as root (root bypasses these
+  # anyway), but the summarizer is a DynamicUser (summarize.nix) that must also
+  # write its summary deliverables here. Everything on this SMB share is
+  # authenticated as the single credentials account regardless of local user, so
+  # these client-side masks are the only gate — open them to the whole box.
   fileSystems."/media/NAS/Netspace" = {
     device = "//192.168.85.50/Netspace";
     fsType = "cifs";
@@ -90,6 +98,8 @@
       "credentials=${config.sops.secrets."smb-secrets".path}"
       "uid=1000"
       "gid=100"
+      "dir_mode=0777"
+      "file_mode=0666"
     ];
   };
 

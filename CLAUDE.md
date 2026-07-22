@@ -158,7 +158,10 @@ This replaced the old hand-placed plaintext files
   entry in the encrypted `secrets/secrets.yaml`, decrypted by sops-nix to
   `/run/secrets/smb-secrets` at activation (see **Secrets (sops-nix)** below).
   Until that entry has real values the mount can't authenticate and delivery
-  just WARNs.
+  just WARNs. The mount is `dir_mode=0777`/`file_mode=0666` (not just the
+  owner `uid=1000`) so the non-root `DynamicUser` summarizer can also write
+  its `<stem>.summary*.md` deliverables into these folders (see the
+  Summarization pipeline's persistence note).
 - The container user is uid 1001 == host user `whisper` (fixed uid, on
   purpose — bind-mounted job dirs rely on it).
 - The image's whisperx downloads its VAD model from a **dead S3 bucket**; the
@@ -210,9 +213,27 @@ llama.cpp CUDA kernels; the Pascal fix is the `cudaCapabilities` pin above.
   resolved under `/srv/whisper/transcripts`, or an absolute path that must
   canonicalize *inside* that dir — traversal/symlink-out is rejected), plus
   optional `prompt` (extra instructions, appended to the base summarizer
-  system prompt), `language`, `model`, `num_ctx`, `temperature`, `keep_alive`.
-  A raw (non-JSON) body is taken verbatim as the transcript; extra instructions
-  then come from the `X-Summarize-Prompt` header. Response: `{"summary","model"}`.
+  system prompt), `language`, `model`, `num_ctx`, `temperature`, and `save`
+  (see persistence below). A raw (non-JSON) body is taken verbatim as the
+  transcript; extra instructions then come from the `X-Summarize-Prompt` header.
+  Response: `{"summary","model"}` (+ `"file"` / `"save_error"` when `save` given).
+- **Persistence + NAS delivery**: with `save`/`stem` = a bare transcript name,
+  the summary is also written next to the transcript as `<stem>.summary.md`
+  (then `<stem>.summary.2.md`, `.3.md`, … — race-free `O_EXCL`, so each
+  "summarize" click **appends** a new numbered summary rather than overwriting).
+  Same path-safety as `file` (must canonicalize to a direct child of the
+  transcript dir). The write happens **after** the GPU lock is released (pure
+  IO), and on any write failure the summary is still returned (`save_error`) so
+  it's never lost. Each saved summary is then best-effort copied to the NAS
+  `<stem>/` folder in a daemon thread (never delays the response; NAS offline
+  just logs). This is why the CIFS mount is loosened to `dir_mode=0777`/
+  `file_mode=0666` (`configuration.nix`) — the summarizer is a `DynamicUser`,
+  not root, and must write there too. The service runs `ProtectSystem="true"`
+  (not `strict`): `strict` would make `/srv` and `/media` read-only, and
+  whitelisting the automounted NAS via `ReadWritePaths` would force the autofs
+  mount at *service start* — hanging/failing when the NAS is offline, defeating
+  the box's `nofail`+automount design. `"true"` keeps `/usr`+`/boot` read-only
+  while leaving both writable, and the NAS still mounts lazily on first write.
 - The server sends `think:false` (Qwen3 is a thinking model) and strips any
   stray `<think>…</think>` defensively, for clean, fast summaries.
 - **VRAM (11 GB, shared with whisper) — GPU lock**: Qwen3-14B weights are ~9 GB
@@ -231,8 +252,19 @@ llama.cpp CUDA kernels; the Pascal fix is the `cudaCapabilities` pin above.
   the model via a separate oneshot (`ollama-model-loader`) after ollama starts —
   it does not block the switch. First deploy: the model isn't ready until that
   pull finishes (~9 GB download); `journalctl -u ollama-model-loader` to watch.
-- Only the endpoint exists so far — **no UI integration yet** (planned: quick
-  "summarize" links from the whisper transcript browser).
+- **UI integration** (`whisper-ui/index.html`): each completed transcript card
+  in the archive has a **summarize** button, a collapsible **+ prompt** textarea
+  (per-transcript extra instructions, persisted in `localStorage` under
+  `whisperprompts`), and — once summaries exist — numbered **#N view/.md** chips
+  that preview/download each `<stem>.summary*.md`. Summarize POSTs
+  `{file, prompt, save:<stem>}` (prefers `<stem>.speakers.txt`, else `.txt`),
+  shows a `summarizing…` pending state, and handles **503** (GPU busy) with a
+  retryable message. The `.summary*.md` files are taught to the archive grouping
+  (`summaryInfo` / `SUMMARY_RE`) so they attach to `<stem>` instead of forming a
+  bogus group. A rough client-side token estimate (~4 chars/token vs.
+  `SUMMARIZE_NUM_CTX`) warns when a transcript likely overflows the context and
+  gets silently truncated. The archive is not re-rendered while a prompt
+  textarea is focused, so polling never eats the user's keystrokes.
 
 ## Gotchas
 
