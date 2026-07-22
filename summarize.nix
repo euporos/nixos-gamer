@@ -21,7 +21,7 @@
 #     "language":   "de|en|fr|ru|...",           # optional: force output language
 #                                                #   (default: same as transcript)
 #     "model":      "qwen3:14b",                 # optional override
-#     "num_ctx":    8192,                        # optional override
+#     "num_ctx":    16384,                       # optional override (default 16384)
 #     "temperature": 0.3,                        # optional override
 #     "save":       "meeting"                    # optional: ALSO persist the
 #                                                #   summary next to the transcript
@@ -334,6 +334,14 @@ in
       # Unload models promptly — the 11 GB card is shared with whisper. Requests
       # may still override per-call via "keep_alive".
       OLLAMA_KEEP_ALIVE = "0";
+      # Fit longer transcripts in a single pass. On the 11 GB card the ~9 GB Q4
+      # weights leave only ~2 GB for the KV cache, and fp16 KV is ~0.16 MB/token
+      # (Qwen3-14B: 40 layers, 8 GQA KV heads, head-dim 128) — so 16k ctx would
+      # need ~2.6 GB and spill. Flash attention + q8_0 KV roughly halves that to
+      # ~1.3 GB, making SUMMARIZE_NUM_CTX=16384 (~80 min of speech) comfortable.
+      # q8_0 KV *requires* flash attention; the quality cost is negligible.
+      OLLAMA_FLASH_ATTENTION = "1";
+      OLLAMA_KV_CACHE_TYPE = "q8_0";
     };
   };
 
@@ -347,7 +355,9 @@ in
       SUMMARIZE_MODEL = "qwen3:14b";
       TRANSCRIPT_ROOT = "/srv/whisper/transcripts";
       SUMMARIZE_PORT = "8991";
-      SUMMARIZE_NUM_CTX = "8192";
+      # ~80 min of speech in one pass; fits VRAM thanks to flash-attn + q8_0 KV
+      # (see services.ollama.environmentVariables). Overridable per request.
+      SUMMARIZE_NUM_CTX = "16384";
       GPU_LOCK = "/run/whisper-gpu.lock";
       SUMMARIZE_LOCK_TIMEOUT = "900";
       # Best-effort NAS delivery of saved summaries, one folder per transcript —

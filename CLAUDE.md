@@ -248,6 +248,18 @@ llama.cpp CUDA kernels; the Pascal fix is the `cudaCapabilities` pin above.
   request returns **503** instead of hanging. The whisper side holds the lock
   per container run (not the whole inbox sweep), so summaries slip in between
   queued jobs. `keep_alive` is therefore no longer a request parameter.
+- **Context window (single-pass ceiling)**: `num_ctx` is capped by VRAM, not by
+  Qwen3 (native 32k). With ~9 GB of Q4 weights only ~2 GB is left for the KV
+  cache, and fp16 KV is ~0.16 MB/token (40 layers, 8 GQA KV heads, head-dim
+  128), so 16k ctx would need ~2.6 GB and spill. `OLLAMA_FLASH_ATTENTION=1` +
+  `OLLAMA_KV_CACHE_TYPE=q8_0` (q8 KV *requires* flash-attn) roughly halve that,
+  making `SUMMARIZE_NUM_CTX=16384` (~80 min of speech, ~190 tok/min) fit
+  comfortably; negligible quality cost. Transcripts beyond ~16k tokens are still
+  truncated by Ollama — the UI warns via its char-based estimate. Raising ctx
+  further (24k+) risks OOM on this card; the real fix for very long inputs is
+  chunked "refine" summarization (deferred), which must keep the model warm
+  across chunk calls under a single held GPU lock to avoid reloading ~9 GB each
+  chunk.
 - **Model provisioning**: `services.ollama.loadModels = [ "qwen3:14b" ]` pulls
   the model via a separate oneshot (`ollama-model-loader`) after ollama starts —
   it does not block the switch. First deploy: the model isn't ready until that
