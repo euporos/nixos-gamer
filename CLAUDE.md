@@ -202,85 +202,106 @@ Summarize a transcript via a local **Ollama running Qwen3 14B** (GGUF Q4) on the
 1080 Ti. Unlike WhisperX this is not a PyTorch problem — Ollama ships its own
 llama.cpp CUDA kernels; the Pascal fix is the `cudaCapabilities` pin above.
 
-- **Endpoint**: `POST http://192.168.85.30:8990/summarize` — an nginx `= /`
-  exact-match location that proxies to a small stdlib-Python server on
-  `127.0.0.1:8991` (`whisper-summarize.service`, `DynamicUser` in the `whisper`
-  group). The location is defined in `summarize.nix` but **merges into the
-  `whisper` vhost declared in `whisper.nix`** (NixOS merges `locations` across
-  modules); exact-match beats the `/` PUT-inbox catch-all, so uploads are
-  unaffected. Port 8991 is never firewalled — only 8990 (nginx) is public.
-- **Request** (JSON): `text` (inline transcript) **or** `file` (a bare name
-  resolved under `/srv/whisper/transcripts`, or an absolute path that must
-  canonicalize *inside* that dir — traversal/symlink-out is rejected), plus
-  optional `prompt` (extra instructions, appended to the base summarizer
-  system prompt), `language`, `model`, `num_ctx`, `temperature`, and `save`
-  (see persistence below). A raw (non-JSON) body is taken verbatim as the
-  transcript; extra instructions then come from the `X-Summarize-Prompt` header.
-  Response: `{"summary","model"}` (+ `"file"` / `"save_error"` when `save` given).
-- **Persistence + NAS delivery**: with `save`/`stem` = a bare transcript name,
-  the summary is also written next to the transcript as `<stem>.summary.md`
-  (then `<stem>.summary.2.md`, `.3.md`, … — race-free `O_EXCL`, so each
-  "summarize" click **appends** a new numbered summary rather than overwriting).
-  Same path-safety as `file` (must canonicalize to a direct child of the
-  transcript dir). The write happens **after** the GPU lock is released (pure
-  IO), and on any write failure the summary is still returned (`save_error`) so
-  it's never lost. Each saved summary is then best-effort copied to the NAS
-  `<stem>/` folder in a daemon thread (never delays the response; NAS offline
-  just logs). **Two things are needed for those writes** (both verified on the
-  box): (1) the CIFS mount is loosened to `dir_mode=0777`/`file_mode=0666`
-  (`configuration.nix`) because the summarizer is a non-root `DynamicUser`; and
-  (2) `ReadWritePaths = [ "/srv/whisper/transcripts"
-  "-/media/NAS/Netspace/artifacts/transcriptions" ]` on the unit. The second is
-  the non-obvious one: **`DynamicUser=yes` forces the entire filesystem
-  read-only** (it behaves like `ProtectSystem=strict`, and a *lower*
-  `ProtectSystem=` does NOT override that under DynamicUser — tested), so loose
-  mount perms alone are useless; only `ReadWritePaths` opens a write hole. The
-  NAS entry is **`-`-prefixed** so an offline/unmounted share at service start
-  is non-fatal — the local `<stem>.summary*.md` is always the source of truth,
-  and the automount only actually mounts when a summary is written.
-- The server sends `think:false` (Qwen3 is a thinking model) and strips any
-  stray `<think>…</think>` defensively, for clean, fast summaries.
-- **VRAM (11 GB, shared with whisper) — GPU lock**: Qwen3-14B weights are ~9 GB
-  and a whisper job also needs the card, so the two are mutually excluded by an
-  `flock` on `/run/whisper-gpu.lock` (tmpfiles-created `0660 root:whisper`). The
-  whisper worker takes it around each container run (`run_whisperx` in
-  `whisper.nix`); the summarizer takes it around its Ollama call **and** holds it
-  until the model is confirmed unloaded — `keep_alive` is forced to `0` and
-  `/api/ps` is polled, so whisper never starts while the LLM is resident and
-  vice versa. With one card the two genuinely serialize: a summary waits for an
-  in-flight whisper job, and if that exceeds `SUMMARIZE_LOCK_TIMEOUT` (900s) the
-  request returns **503** instead of hanging. The whisper side holds the lock
-  per container run (not the whole inbox sweep), so summaries slip in between
-  queued jobs. `keep_alive` is therefore no longer a request parameter.
-- **Context window (single-pass ceiling)**: `num_ctx` is capped by VRAM, not by
-  Qwen3 (native 32k). With ~9 GB of Q4 weights only ~2 GB is left for the KV
-  cache, and fp16 KV is ~0.16 MB/token (40 layers, 8 GQA KV heads, head-dim
-  128), so 16k ctx would need ~2.6 GB and spill. `OLLAMA_FLASH_ATTENTION=1` +
-  `OLLAMA_KV_CACHE_TYPE=q8_0` (q8 KV *requires* flash-attn) roughly halve that,
-  making `SUMMARIZE_NUM_CTX=16384` (~80 min of speech, ~190 tok/min) fit
-  comfortably; negligible quality cost. Transcripts beyond ~16k tokens are still
-  truncated by Ollama — the UI warns via its char-based estimate. Raising ctx
-  further (24k+) risks OOM on this card; the real fix for very long inputs is
-  chunked "refine" summarization (deferred), which must keep the model warm
-  across chunk calls under a single held GPU lock to avoid reloading ~9 GB each
-  chunk.
-- **Model provisioning**: `services.ollama.loadModels = [ "qwen3:14b" ]` pulls
-  the model via a separate oneshot (`ollama-model-loader`) after ollama starts —
-  it does not block the switch. First deploy: the model isn't ready until that
-  pull finishes (~9 GB download); `journalctl -u ollama-model-loader` to watch.
-- **UI integration** (`whisper-ui/index.html`): each completed transcript card
-  in the archive has a **summarize** button, a collapsible **+ prompt** textarea
-  (per-transcript extra instructions, persisted in `localStorage` under
-  `whisperprompts`), and — once summaries exist — numbered **#N view/.md** chips
-  that preview/download each `<stem>.summary*.md`. Summarize POSTs
-  `{file, prompt, save:<stem>}` (prefers `<stem>.speakers.txt`, else `.txt`),
-  shows a `summarizing…` pending state, and handles **503** (GPU busy) with a
-  retryable message. The `.summary*.md` files are taught to the archive grouping
-  (`summaryInfo` / `SUMMARY_RE`) so they attach to `<stem>` instead of forming a
-  bogus group. A rough client-side token estimate (~4 chars/token vs.
-  `SUMMARIZE_NUM_CTX`) warns when a transcript likely overflows the context and
-  gets silently truncated. The archive is not re-rendered while a prompt
-  textarea is focused, so polling never eats the user's keystrokes.
+**Architecture is fully async and file-driven — a second copy of the whisper
+pipeline, not an HTTP service.** (The old synchronous `POST /summarize` daemon
+`whisper-summarize.service`, its `= /summarize` nginx proxy, the `DynamicUser`
+read-only-fs workaround, and the 503-on-GPU-busy path were **all retired**.) You
+drop a small JSON job spec in an inbox and poll for the resulting file — exactly
+like transcripts.
+
+- **Job dirs** (tmpfiles, parallel to the audio inbox): `/srv/whisper/summaries/{inbox,work,failed,control}`.
+  `inbox`/`control` are `2770 whisper whisper` (setgid, group-writable) so nginx
+  (in the `whisper` group) can PUT into them; `work`/`failed` are `0770` (root
+  worker writes, group reads for the UI listings).
+- **Submit**: `PUT http://192.168.85.30:8990/summaries/inbox/<jobid>.json` with a
+  spec body. nginx maps the URL onto the dir via `root = /srv/whisper` (same
+  trick as `/control/`, no dav+alias pitfall). Spec keys: **`stem`** (required —
+  worker reads `<stem>.speakers.txt` preferred else `<stem>.txt` from
+  `transcripts/`, same path-safety: bare name canonicalizing to a direct child),
+  plus optional `prompt`, `language`, `model`, `num_ctx`, `temperature`, `label`
+  (UI display only). `<jobid>` is a UI-generated id; the stem lives *inside* the
+  spec (prompt is free text, can't be a filename).
+- **Poll**: `/status/summaries/{inbox,work,failed}/` autoindex-JSON listings.
+- **Cancel**: `PUT /summaries/control/<jobid>.cancel` (see cancel semantics below).
+- **Result**: `<stem>.summary[.N].md` in `/srv/whisper/transcripts/` (race-free
+  `O_EXCL` numbering — each summarize **appends** a new numbered summary), plus
+  for chunked jobs `<stem>.notes.md`. These stay in `transcripts/`, so the
+  existing archive grouping, UI polling, and NAS delivery all work unchanged.
+- **systemd**: `summarize-worker.service` (oneshot, **root** — no DynamicUser) +
+  `.path` (`DirectoryNotEmpty=…/inbox`) + a 10-min sweep timer; and
+  `summarize-control.service` + `.path` (`…/control`). Mirrors the `whisper-worker`
+  / `whisper-control` trio. `TimeoutStartSec=12h` because a job blocks on the GPU
+  flock while a transcription runs and may itself be a multi-pass condense.
+- **Worker algorithm** (pure-stdlib Python, drains inbox one job at a time):
+  move spec `inbox → work` (this **is** the "running" signal the UI polls) →
+  estimate tokens (~4 chars/tok) → take the GPU flock → branch → release lock →
+  write outputs → move spec out of `work/` (success removes it; any error moves
+  it to `failed/`, kept for inspection).
+  - **Fits one pass** (est ≤ `0.8·num_ctx`): single Ollama call, `keep_alive=0`.
+  - **Too big → chunked condense.** Break the transcript on **line boundaries**
+    (never mid-segment) into ~12k-token chunks. **Refine / rolling carry-over:**
+    maintain a bounded, purpose-**neutral** running-notes digest; each pass gets
+    *(notes so far + next chunk) → (updated notes)*. The condense instruction is
+    "capture everything faithfully", **NOT** the user's purpose prompt — applying
+    "list action items" per chunk would discard context later chunks need. The
+    user's prompt is applied only in a **final render pass** over the completed
+    notes. **The model is kept WARM across chunk passes** (per-call
+    `keep_alive="10m"`) under the single held GPU lock, and only force-unloaded at
+    the very end — reloading ~9 GB per chunk is the whole reason chunking and the
+    GPU lock are co-designed.
+  - **Notes cache**: the digest is saved as `<stem>.notes.md` (surfaced as a link
+    in the UI). A later job for the **same long stem** skips chunking entirely and
+    does only the fast final render over the cached notes. Short transcripts never
+    produce a notes file.
+- **GPU lock (VRAM 11 GB, shared with whisper)**: Qwen3-14B weights are ~9 GB, so
+  the two serialize via `flock` on `/run/whisper-gpu.lock` (`0660 root:whisper`).
+  The worker takes it around **all** its Ollama calls for a job and holds it until
+  the model is confirmed unloaded (final call `keep_alive=0`, `/api/ps` polled;
+  on cancel/error a `force_unload` is issued first). The whisper side holds the
+  lock per container run, so a summary slips in between queued whisper jobs. A
+  queued summary simply **waits (blocking flock)** for an in-flight transcription
+  — there is no synchronous caller, hence **no timeout and no 503** any more.
+- **Cancel semantics** (best-effort, per design): a **queued** job — `summarize-control`
+  moves its spec `inbox → failed` and clears the sentinel. A **running** job —
+  control hands the sentinel to the worker by moving it to `work/<jobid>.cancel`
+  (this **empties `control/`** so its `DirectoryNotEmpty` path unit doesn't
+  busy-loop), and the worker aborts at the **next chunk boundary** (an in-flight
+  Ollama generation is never killed). The worker also checks `control/` directly
+  in case control hasn't run yet. Stale sentinels are just cleared.
+- **Context window**: `num_ctx` (16k, `SUMMARIZE_NUM_CTX`) is capped by VRAM, not
+  Qwen3 (native 32k): ~9 GB weights leave ~2 GB for KV; fp16 KV is ~0.16 MB/token
+  (40 layers, 8 GQA KV heads, head-dim 128) → 16k would need ~2.6 GB and spill.
+  `OLLAMA_FLASH_ATTENTION=1` + `OLLAMA_KV_CACHE_TYPE=q8_0` (q8 KV *requires*
+  flash-attn) roughly halve that to ~1.3 GB. 16k is now the **per-pass / per-chunk**
+  ceiling, not the whole-transcript ceiling — longer inputs are chunked, not
+  truncated. Raising ctx to 24k+ risks OOM on this card.
+- **NAS delivery**: each saved `<stem>.summary*.md` and `<stem>.notes.md` is
+  best-effort copied to the NAS `<stem>/` folder (temp+rename), same target as the
+  whisper worker; NAS offline just logs. Because the worker is **root** now, the
+  old `DynamicUser` write-hole plumbing is gone — root bypasses the CIFS masks, so
+  the loosened `dir_mode=0777`/`file_mode=0666` in `configuration.nix` is no
+  longer needed *for summaries* (still used by whisper delivery; leave it).
+- The worker sends `think:false` (Qwen3 is a thinking model) and strips any stray
+  `<think>…</think>` defensively.
+- **Model provisioning**: `services.ollama.loadModels = [ "qwen3:14b" ]` pulls the
+  model via a separate oneshot (`ollama-model-loader`) after ollama starts — it
+  does not block the switch. First deploy: not ready until that ~9 GB pull
+  finishes; `journalctl -u ollama-model-loader` to watch.
+- **UI integration** (`whisper-ui/index.html`): the **summarize** button now just
+  builds a spec and `PUT`s it to `/summaries/inbox/<jobid>.json` (no awaited
+  result). In-flight jobs show as **chips** on the matching transcript card
+  (`summary · queued/running/failed` + cancel/dismiss), attributed via a
+  `localStorage` `jobid → {stem,label}` map (`whispersumjobs`) — single-user, a
+  second browser wouldn't know an in-flight job's stem, but the finished file is
+  shared regardless. The three `/status/summaries/*` listings are added to
+  `poll()`; `reconcileSumjobs()` drops a tracked job once it's `seen` then absent
+  (its `.summary.N.md` shows on its own). `.notes.md` is taught to the archive
+  grouping (`NOTES_RE`) so it attaches to `<stem>` as a link (like `SUMMARY_RE`
+  for summaries), never a bogus group. The `+ prompt` textarea (persisted under
+  `whisperprompts`) and numbered `#N view/.md` summary chips are unchanged. The
+  token estimate is now **informational** ("longer than one pass; will be
+  condensed in chunks"), not a truncation blocker. The archive is not re-rendered
+  while a prompt textarea is focused, so polling never eats keystrokes.
 
 ## Electricity / idle power (`disk-spindown.nix`)
 

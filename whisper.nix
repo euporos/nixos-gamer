@@ -427,12 +427,35 @@ in
           limit_except PUT { deny all; }
         '';
       };
+      # Summarization job intake (async, file-driven — see summarize.nix). The UI
+      # PUTs a JSON job spec to /summaries/inbox/<jobid>.json and cancel sentinels
+      # to /summaries/control/<jobid>.cancel; root maps the URL straight onto the
+      # tmpfiles dirs, exactly like /control/ above (no dav+alias pitfall).
+      locations."/summaries/inbox/" = {
+        root = "/srv/whisper";
+        extraConfig = ''
+          dav_methods PUT;
+          create_full_put_path off;
+          limit_except PUT { deny all; }
+        '';
+      };
+      locations."/summaries/control/" = {
+        root = "/srv/whisper";
+        extraConfig = ''
+          dav_methods PUT;
+          create_full_put_path off;
+          limit_except PUT { deny all; }
+        '';
+      };
       # JSON listings the UI polls to derive job state — covers jobs started
       # from the CLI too, since they are just files in these directories.
       locations."/status/inbox/" = statusListing "/srv/whisper/inbox/";
       locations."/status/work/" = statusListing "/srv/whisper/work/";
       locations."/status/failed/" = statusListing "/srv/whisper/failed/";
       locations."/status/transcripts/" = statusListing "/srv/whisper/transcripts/";
+      locations."/status/summaries/inbox/" = statusListing "/srv/whisper/summaries/inbox/";
+      locations."/status/summaries/work/" = statusListing "/srv/whisper/summaries/work/";
+      locations."/status/summaries/failed/" = statusListing "/srv/whisper/summaries/failed/";
       locations."/transcripts/" = {
         alias = "/srv/whisper/transcripts/";
         extraConfig = ''
@@ -445,10 +468,13 @@ in
   networking.firewall.allowedTCPPorts = [ 8990 ];
 
   # The NixOS nginx unit runs with ProtectSystem=strict — writing PUT
-  # uploads into the inbox/control dirs must be whitelisted explicitly.
+  # uploads into the inbox/control dirs must be whitelisted explicitly. This
+  # covers both the audio inbox/control and the summary job inbox/control.
   systemd.services.nginx.serviceConfig.ReadWritePaths = [
     "/srv/whisper/inbox"
     "/srv/whisper/control"
+    "/srv/whisper/summaries/inbox"
+    "/srv/whisper/summaries/control"
   ];
 
   systemd.services.whisper-worker = {

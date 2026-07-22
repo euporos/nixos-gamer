@@ -217,6 +217,13 @@
     padding:2px 8px;display:inline-flex;align-items:center;
   }
   .sum-chip a:hover{color:var(--amber-hi)}
+  .sum-chip.pending{border-color:var(--dim)}
+  .sum-chip .jobstate{
+    padding:2px 9px;color:var(--dim);font-size:11px;letter-spacing:.08em;
+    border-right:1px solid var(--line);display:inline-flex;align-items:center;
+  }
+  .sum-chip .jobstate.run{color:var(--amber-hi)}
+  .sum-chip .jobstate.err{color:var(--red)}
   .sum-warn{
     margin-top:8px;color:var(--amber-hi);font-size:11px;letter-spacing:.03em;
     border-left:2px solid var(--amber);padding:2px 0 2px 9px;
@@ -302,9 +309,11 @@ const TRANSCRIPT_EXTS = ['speakers.txt','json','srt','tsv','txt','vtt'];
 const EXT_ORDER = ['speakers.txt','txt','srt','vtt','tsv','json'];
 // summaries persist as <stem>.summary.md, <stem>.summary.2.md, ... (see summarize.nix)
 const SUMMARY_RE = /^(.+)\.summary(?:\.(\d+))?\.md$/;
-// must match SUMMARIZE_NUM_CTX in summarize.nix — used only to warn (client-side,
-// ~4 chars/token) when a transcript likely overflows the context and gets
-// silently truncated by Ollama
+// the condensed-notes cache a chunked (long) summary job leaves behind
+const NOTES_RE = /^(.+)\.notes\.md$/;
+// must match SUMMARIZE_NUM_CTX in summarize.nix — used only to note (client-side,
+// ~4 chars/token) when a transcript is longer than one pass and will therefore
+// be condensed in chunks by the summary worker
 const SUMMARIZE_NUM_CTX = 16384;
 // seconds of fixed overhead (container start + model load) added to the ETA
 const ETA_OVERHEAD_S = 90, RT_FACTOR = 15;
@@ -317,7 +326,8 @@ document.getElementById('curlhint').textContent =
 const meta = JSON.parse(localStorage.getItem('whisperui') || '{}');
 const saveMeta = () => localStorage.setItem('whisperui', JSON.stringify(meta));
 const uploads = {};            // name -> {pct, error}
-let server = {inbox:[], working:[], failed:[], transcripts:[], ok:false};
+let server = {inbox:[], working:[], failed:[], transcripts:[],
+              sumInbox:new Set(), sumWork:new Set(), sumFailed:new Set(), ok:false};
 const expanded = new Set();    // stems (transcript preview) + summary filenames, open
 const previews = {};           // stem | summary-filename -> {text} | {error} | {loading}
 // per-transcript summarization extras, survives reloads (own key so pruneMeta,
@@ -325,8 +335,12 @@ const previews = {};           // stem | summary-filename -> {text} | {error} | 
 const prompts = JSON.parse(localStorage.getItem('whisperprompts') || '{}');
 const savePrompts = () => localStorage.setItem('whisperprompts', JSON.stringify(prompts));
 const promptOpen = new Set();  // stems whose extra-prompt textarea is shown
-const summarizing = new Set(); // stems with an in-flight /summarize request
-const summaryErr = {};         // stem -> last error string (503 / failure)
+// in-flight async summary jobs: jobid -> {stem, label, ts, seen, cancelled}.
+// Single-user attribution (jobid->stem) lives here, in localStorage — the
+// finished <stem>.summary.N.md file itself is fully shared regardless.
+const sumjobs = JSON.parse(localStorage.getItem('whispersumjobs') || '{}');
+const saveSumjobs = () => localStorage.setItem('whispersumjobs', JSON.stringify(sumjobs));
+const summaryErr = {};         // stem -> last queue-submission error string
 
 /* ---------- helpers ---------- */
 const $ = sel => document.querySelector(sel);
@@ -362,11 +376,18 @@ async function jfetch(url){
 }
 
 /* ---------- polling ---------- */
+// bare job ids of the *.json specs in a summary status listing
+const specIds = arr => new Set(arr
+  .filter(e => e.type === 'file' && e.name.endsWith('.json'))
+  .map(e => e.name.slice(0, -5)));
+
 async function poll(){
   try{
-    const [inbox, work, failed, transcripts] = await Promise.all([
+    const [inbox, work, failed, transcripts, sInbox, sWork, sFailed] = await Promise.all([
       jfetch('/status/inbox/'), jfetch('/status/work/'),
       jfetch('/status/failed/'), jfetch('/status/transcripts/'),
+      jfetch('/status/summaries/inbox/'), jfetch('/status/summaries/work/'),
+      jfetch('/status/summaries/failed/'),
     ]);
     // each work/job.* dir holds the audio being transcribed (plus, late in the
     // run, its finished outputs) — the audio is the one non-transcript file
@@ -378,18 +399,41 @@ async function poll(){
         if(audio) working.push({name: audio.name, since: Date.parse(d.mtime)});
       }catch(e){ /* job dir vanished or not yet readable — next poll */ }
     }
-    server = {inbox, working, failed, transcripts, ok:true};
+    server = {inbox, working, failed, transcripts, ok:true,
+              sumInbox: specIds(sInbox), sumWork: specIds(sWork), sumFailed: specIds(sFailed)};
     // an upload the server now knows about is no longer "uploading"
     for(const n of Object.keys(uploads)){
       if(!uploads[n].error &&
          (inbox.some(f => f.name === n) || working.some(w => w.name === n)))
         delete uploads[n];
     }
+    reconcileSumjobs();
   }catch(e){
     server.ok = false;
   }
   document.body.classList.toggle('offline', !server.ok);
   render();
+}
+
+// resolve a tracked summary job's state from the status listings
+function sumState(jobid){
+  const info = sumjobs[jobid];
+  if(server.sumInbox.has(jobid)) return 'queued';
+  if(server.sumWork.has(jobid))  return 'running';
+  if(server.sumFailed.has(jobid)) return info && info.cancelled ? 'cancelled' : 'failed';
+  // absent everywhere: still-invisible fresh submission if never seen, else done
+  return info && info.seen ? 'done' : 'queued';
+}
+// mark jobs the server has confirmed, and drop ones that finished (their
+// <stem>.summary.N.md now shows in the archive on its own)
+function reconcileSumjobs(){
+  let dirty = false;
+  for(const [jobid, info] of Object.entries(sumjobs)){
+    const known = server.sumInbox.has(jobid) || server.sumWork.has(jobid) || server.sumFailed.has(jobid);
+    if(known){ if(!info.seen){ info.seen = true; dirty = true; } }
+    else if(info.seen){ delete sumjobs[jobid]; dirty = true; }
+  }
+  if(dirty) saveSumjobs();
 }
 
 /* ---------- job model ---------- */
@@ -411,7 +455,7 @@ function jobList(){
 function archiveGroups(){
   const g = {};
   const ensure = stem => g[stem] ||
-    (g[stem] = {stem, exts:[], summaries:[], mtime:0, speakersBytes:0, txtBytes:0});
+    (g[stem] = {stem, exts:[], summaries:[], notes:null, mtime:0, speakersBytes:0, txtBytes:0});
   for(const f of server.transcripts.filter(e => e.type === 'file')){
     // summaries attach to their transcript's group rather than forming one
     const s = summaryInfo(f.name);
@@ -421,13 +465,21 @@ function archiveGroups(){
       grp.mtime = Math.max(grp.mtime, Date.parse(f.mtime));
       continue;
     }
+    // the condensed-notes cache likewise attaches to its transcript's group
+    const nt = NOTES_RE.exec(f.name);
+    if(nt){
+      const grp = ensure(nt[1]);
+      grp.notes = {name: f.name, mtime: Date.parse(f.mtime)};
+      grp.mtime = Math.max(grp.mtime, Date.parse(f.mtime));
+      continue;
+    }
     const stem = transcriptStem(f.name);
     if(stem === null) continue;
     const ext = f.name.slice(stem.length + 1);
     const grp = ensure(stem);
     grp.exts.push(ext);
     grp.mtime = Math.max(grp.mtime, Date.parse(f.mtime));
-    // remember the size of the text we'd send to /summarize, to estimate tokens
+    // remember the size of the text the summary worker will read, to estimate tokens
     if(ext === 'speakers.txt') grp.speakersBytes = f.size || 0;
     else if(ext === 'txt')     grp.txtBytes = f.size || 0;
   }
@@ -438,10 +490,8 @@ function archiveGroups(){
   return Object.values(g).sort((a,b) => b.mtime - a.mtime);
 }
 
-// the file /summarize will read: prefer the speaker-labelled transcript
-const summarizeSource = g =>
-  g.exts.includes('speakers.txt') ? g.stem + '.speakers.txt' : g.stem + '.txt';
-// rough token estimate (~4 chars/token) of that file, for the overflow warning
+// rough token estimate (~4 chars/token) of the file the worker will summarize
+// (prefers .speakers.txt, else .txt) — drives the "will be chunked" note
 const estTokens = g => Math.round((g.speakersBytes || g.txtBytes || 0) / 4);
 
 /* ---------- rendering ---------- */
@@ -498,11 +548,20 @@ function render(){
   tick();
 }
 
+// pending/failed async summary jobs attributed to this stem (newest first)
+function sumJobsFor(stem){
+  return Object.entries(sumjobs)
+    .filter(([, info]) => info.stem === stem)
+    .map(([jobid, info]) => ({jobid, label: info.label, ts: info.ts, state: sumState(jobid)}))
+    .filter(j => j.state !== 'done')
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+}
+
 function renderGroup(g){
   const fresh = Date.now() - g.mtime < 10 * 60 * 1000;
-  const busy = summarizing.has(g.stem);
   const links = g.exts.map(ext =>
-    `<a href="/transcripts/${encodeURIComponent(g.stem + '.' + ext)}" download>.${ext}</a>`).join('');
+    `<a href="/transcripts/${encodeURIComponent(g.stem + '.' + ext)}" download>.${ext}</a>`).join('')
+    + (g.notes ? `<a href="/transcripts/${encodeURIComponent(g.notes.name)}" download title="condensed running-notes cache used for chunked summaries">.notes.md</a>` : '');
 
   // transcript preview
   const p = previews[g.stem];
@@ -524,15 +583,23 @@ function renderGroup(g){
     return `<pre class="summary">${inner}</pre>`;
   }).join('');
 
+  // in-flight / failed summary jobs for this transcript (queued/running/failed)
+  const jobs = sumJobsFor(g.stem);
+  const jobChips = jobs.length ? `<div class="sums">
+      <span class="lbl">jobs</span>
+      ${jobs.map(renderSumJobChip).join('')}
+    </div>` : '';
+
   // collapsible per-transcript extra-prompt textarea
   const promptBox = promptOpen.has(g.stem)
     ? `<textarea class="sum-extra" data-stem="${esc(g.stem)}" rows="3" placeholder="extra summarizer instructions — e.g. 'focus on decisions & action items', 'in English', 'three bullet points'">${esc(prompts[g.stem] || '')}</textarea>`
     : '';
 
-  // truncation warning (rough client-side estimate) + last error
+  // long-transcript note (rough client-side estimate) — informational, not a
+  // blocker: the worker condenses long inputs in chunks instead of truncating
   const tok = estTokens(g);
   const warn = tok > SUMMARIZE_NUM_CTX
-    ? `<div class="sum-warn">~${tok.toLocaleString()} tokens — likely over the ${SUMMARIZE_NUM_CTX.toLocaleString()}-token context; the summary may be truncated.</div>`
+    ? `<div class="sum-warn">~${tok.toLocaleString()} tokens — longer than one ${SUMMARIZE_NUM_CTX.toLocaleString()}-token pass; it will be condensed in chunks (a .notes.md cache is kept).</div>`
     : '';
   const err = summaryErr[g.stem]
     ? `<div class="sum-err">${esc(summaryErr[g.stem])}</div>` : '';
@@ -545,17 +612,29 @@ function renderGroup(g){
       <div class="actions">
         <button class="preview-btn" data-action="toggle" data-name="${esc(g.stem)}">${expanded.has(g.stem) ? 'hide' : 'view'}</button>
         <button class="sum-btn" data-action="prompt" data-name="${esc(g.stem)}">${promptOpen.has(g.stem) ? '- prompt' : '+ prompt'}</button>
-        <button class="sum-btn" data-action="summarize" data-name="${esc(g.stem)}"${busy ? ' disabled' : ''}>${busy ? 'summarizing…' : 'summarize'}</button>
+        <button class="sum-btn" data-action="summarize" data-name="${esc(g.stem)}">summarize</button>
       </div>
     </div>
     <div class="exts">${links}</div>
     ${promptBox}
     ${warn}
     ${err}
+    ${jobChips}
     ${preview}
     ${sums}
     ${sumPreviews}
   </div>`;
+}
+
+// a chip for one in-flight/failed summary job: state label + cancel/dismiss
+function renderSumJobChip(j){
+  const cls = j.state === 'running' ? 'run' : j.state === 'failed' ? 'err'
+            : j.state === 'cancelled' ? 'err' : '';
+  const lbl = j.label ? ' · ' + esc(j.label) : '';
+  const act = (j.state === 'queued' || j.state === 'running')
+    ? `<button data-action="sum-cancel" data-jobid="${esc(j.jobid)}">cancel</button>`
+    : `<button data-action="sum-dismiss" data-jobid="${esc(j.jobid)}">dismiss</button>`;
+  return `<span class="sum-chip pending"><span class="jobstate ${cls}">summary · ${j.state}${lbl}</span>${act}</span>`;
 }
 
 const highlightSpeakers = text =>
@@ -607,6 +686,16 @@ document.addEventListener('click', async ev => {
     render();
   }else if(action === 'summarize'){
     summarize(name);
+  }else if(action === 'sum-cancel'){
+    const jobid = btn.dataset.jobid;
+    btn.disabled = true;
+    if(sumjobs[jobid]){ sumjobs[jobid].cancelled = Date.now(); saveSumjobs(); }
+    try{ await sumControl(jobid, 'cancel'); }catch(e){}
+    setTimeout(poll, 1200);
+  }else if(action === 'sum-dismiss'){
+    const jobid = btn.dataset.jobid;
+    delete sumjobs[jobid]; saveSumjobs();
+    render();
   }
 });
 
@@ -618,40 +707,44 @@ document.addEventListener('input', ev => {
   savePrompts();
 });
 
+// generate a filename-safe, collision-unlikely job id
+const newJobId = () =>
+  Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+// Queue an async summary job: build a JSON spec and PUT it into the summary
+// inbox. Progress then shows as a chip on this card via polling — there is no
+// synchronous result (the worker writes <stem>.summary.N.md, which the archive
+// picks up on its own). The worker resolves the source (.speakers.txt else .txt)
+// and, for long transcripts, condenses in chunks — none of that is our concern.
 async function summarize(stem){
-  if(summarizing.has(stem)) return;
-  // prefer the speaker-labelled transcript, else the plain .txt
-  const hasSpk = server.transcripts.some(f => f.type === 'file' && f.name === stem + '.speakers.txt');
-  const file = hasSpk ? stem + '.speakers.txt' : stem + '.txt';
-  summarizing.add(stem); delete summaryErr[stem]; render();
+  const jobid = newJobId();
+  const prompt = prompts[stem] || '';
+  const spec = {stem, prompt};
+  const label = prompt.trim().replace(/\s+/g, ' ').slice(0, 40);
+  sumjobs[jobid] = {stem, label, ts: Date.now(), seen: false};
+  saveSumjobs();
+  delete summaryErr[stem];
+  render();
   try{
-    const r = await fetch('/summarize', {
-      method: 'POST',
+    const r = await fetch('/summaries/inbox/' + encodeURIComponent(jobid + '.json'), {
+      method: 'PUT',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({file, prompt: prompts[stem] || '', save: stem}),
+      body: JSON.stringify(spec),
     });
-    let data = {};
-    try{ data = await r.json(); }catch(e){}
     if(!r.ok){
-      summaryErr[stem] = r.status === 503
-        ? (data.error || 'GPU busy with transcription — try again shortly') + ' (retry)'
-        : (data.error || ('summarize failed — HTTP ' + r.status));
-      return;
-    }
-    if(data.save_error) summaryErr[stem] = 'summary shown but not saved: ' + data.save_error;
-    // pre-seed the preview so the new summary shows instantly; the file itself
-    // appears as a chip on the next poll
-    if(data.file && typeof data.summary === 'string'){
-      previews[data.file] = {text: data.summary};
-      expanded.add(data.file);
+      summaryErr[stem] = 'could not queue summary — HTTP ' + r.status;
+      delete sumjobs[jobid]; saveSumjobs();
     }
   }catch(e){
-    summaryErr[stem] = 'summarize failed — ' + (e.message || 'network error');
+    summaryErr[stem] = 'could not queue summary — ' + (e.message || 'network error');
+    delete sumjobs[jobid]; saveSumjobs();
   }finally{
-    summarizing.delete(stem);
-    poll();   // refresh the listing so the saved summary chip appears
+    poll();   // pick up the queued spec as a chip right away
   }
 }
+
+const sumControl = (jobid, verb) =>
+  fetch('/summaries/control/' + encodeURIComponent(jobid + '.' + verb), {method:'PUT', body:''});
 
 async function loadSummary(file){
   previews[file] = {loading:true};
