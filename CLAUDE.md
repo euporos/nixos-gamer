@@ -215,12 +215,18 @@ llama.cpp CUDA kernels; the Pascal fix is the `cudaCapabilities` pin above.
   then come from the `X-Summarize-Prompt` header. Response: `{"summary","model"}`.
 - The server sends `think:false` (Qwen3 is a thinking model) and strips any
   stray `<think>…</think>` defensively, for clean, fast summaries.
-- **VRAM (11 GB, shared with whisper)**: Qwen3-14B weights are ~9 GB.
-  `OLLAMA_KEEP_ALIVE=0` (service env, per-request overridable) unloads the model
-  right after each summary so it doesn't sit on VRAM the **10-min whisper sweep**
-  needs. This shrinks but does not eliminate the collision window — a summary
-  running exactly when a whisper job starts can still contend. Real GPU mutual
-  exclusion between the two is deferred until this is wired into the UI.
+- **VRAM (11 GB, shared with whisper) — GPU lock**: Qwen3-14B weights are ~9 GB
+  and a whisper job also needs the card, so the two are mutually excluded by an
+  `flock` on `/run/whisper-gpu.lock` (tmpfiles-created `0660 root:whisper`). The
+  whisper worker takes it around each container run (`run_whisperx` in
+  `whisper.nix`); the summarizer takes it around its Ollama call **and** holds it
+  until the model is confirmed unloaded — `keep_alive` is forced to `0` and
+  `/api/ps` is polled, so whisper never starts while the LLM is resident and
+  vice versa. With one card the two genuinely serialize: a summary waits for an
+  in-flight whisper job, and if that exceeds `SUMMARIZE_LOCK_TIMEOUT` (900s) the
+  request returns **503** instead of hanging. The whisper side holds the lock
+  per container run (not the whole inbox sweep), so summaries slip in between
+  queued jobs. `keep_alive` is therefore no longer a request parameter.
 - **Model provisioning**: `services.ollama.loadModels = [ "qwen3:14b" ]` pulls
   the model via a separate oneshot (`ollama-model-loader`) after ollama starts —
   it does not block the switch. First deploy: the model isn't ready until that

@@ -113,7 +113,7 @@ let
 
   worker = pkgs.writeShellApplication {
     name = "whisper-worker";
-    runtimeInputs = [ pkgs.podman pkgs.jq pkgs.coreutils pkgs.curl pkgs.ffmpeg pkgs.python3 ];
+    runtimeInputs = [ pkgs.podman pkgs.jq pkgs.coreutils pkgs.curl pkgs.ffmpeg pkgs.python3 pkgs.util-linux ];
     text = ''
       IMAGE=${lib.escapeShellArg image}
       INBOX=/srv/whisper/inbox
@@ -157,8 +157,15 @@ let
       # One WhisperX container pass over the current job. Callers set $name/$job
       # first (dynamic scope). The fixed container name keeps cancel working —
       # the worker is strictly serial, so only one job container ever exists.
+      #
+      # flock serializes GPU use with the summarizer (Ollama/Qwen3, summarize.nix):
+      # the 1080 Ti's 11 GB can't hold a whisper model and the ~9 GB LLM at once.
+      # Both sides take an exclusive lock on /run/whisper-gpu.lock (created by
+      # tmpfiles in summarize.nix). The lock is held only for this one container
+      # run, so a pending summary can slip in between queued jobs.
       run_whisperx() {
-        timeout 6h podman run --rm --replace \
+        flock /run/whisper-gpu.lock \
+          timeout 6h podman run --rm --replace \
           --name whisper-job --label "file=$name" \
           --device nvidia.com/gpu=all \
           -v "$job:/app" \
