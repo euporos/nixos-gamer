@@ -214,6 +214,13 @@
     color:var(--ink);background:var(--bg);border:1px solid var(--faint);
   }
   label.sum-words input:focus-visible{outline:1px solid var(--amber-hi);outline-offset:2px;border-color:var(--amber)}
+  select.sum-preset{
+    display:block;margin-top:10px;font-family:inherit;font-size:12px;
+    color:var(--ink);background:var(--bg);border:1px solid var(--faint);
+    padding:4px 10px;cursor:pointer;
+  }
+  select.sum-preset:hover{border-color:var(--amber)}
+  select.sum-preset:focus-visible{outline:1px solid var(--amber-hi);outline-offset:2px}
   .sums{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px}
   .sums .lbl{
     color:var(--faint);font-size:10px;letter-spacing:.2em;text-transform:uppercase;
@@ -349,6 +356,9 @@ const DEFAULT_TARGET_WORDS = 500;
 const sumWords = JSON.parse(localStorage.getItem('whispersumwords') || '{}');
 const saveSumWords = () => localStorage.setItem('whispersumwords', JSON.stringify(sumWords));
 const promptOpen = new Set();  // stems whose extra-prompt textarea is shown
+// named prompt presets served from /prompts.json (see summarize-prompts.nix):
+// {name -> prompt text}. Picking one fills a transcript's prompt box.
+let presets = {};
 // in-flight async summary jobs: jobid -> {stem, label, ts, seen, cancelled}.
 // Single-user attribution (jobid->stem) lives here, in localStorage — the
 // finished <stem>.summary.N.md file itself is fully shared regardless.
@@ -604,9 +614,16 @@ function renderGroup(g){
       ${jobs.map(renderSumJobChip).join('')}
     </div>` : '';
 
-  // collapsible per-transcript extra-prompt textarea
+  // collapsible per-transcript extra-prompt textarea, with a preset picker
+  // (from /prompts.json) that fills it — shown only if any presets are defined
+  const presetSel = Object.keys(presets).length
+    ? `<select class="sum-preset" data-preset-stem="${esc(g.stem)}" title="load a named prompt preset (summarize-prompts.nix)">
+         <option value="">preset…</option>
+         ${Object.keys(presets).map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join('')}
+       </select>`
+    : '';
   const promptBox = promptOpen.has(g.stem)
-    ? `<textarea class="sum-extra" data-stem="${esc(g.stem)}" rows="3" placeholder="extra summarizer instructions — e.g. 'focus on decisions & action items', 'in English', 'three bullet points'">${esc(prompts[g.stem] || '')}</textarea>
+    ? `${presetSel}<textarea class="sum-extra" data-stem="${esc(g.stem)}" rows="3" placeholder="extra summarizer instructions — e.g. 'focus on decisions & action items', 'in English', 'three bullet points'">${esc(prompts[g.stem] || '')}</textarea>
        <label class="sum-words">target length <input type="number" min="50" step="50" data-words-stem="${esc(g.stem)}" value="${sumWords[g.stem] || DEFAULT_TARGET_WORDS}"> words (strict &plusmn;10%)</label>`
     : '';
 
@@ -710,6 +727,20 @@ document.addEventListener('click', async ev => {
   }else if(action === 'sum-dismiss'){
     const jobid = btn.dataset.jobid;
     delete sumjobs[jobid]; saveSumjobs();
+    render();
+  }
+});
+
+// picking a named preset drops its text into that transcript's prompt box
+// (which then feeds the job spec's "prompt" as usual, so it survives reloads)
+document.addEventListener('change', ev => {
+  const sel = ev.target.closest('select[data-preset-stem]');
+  if(!sel) return;
+  const stem = sel.dataset.presetStem, key = sel.value;
+  if(key && presets[key] != null){
+    prompts[stem] = presets[key].trim();
+    savePrompts();
+    promptOpen.add(stem);
     render();
   }
 });
@@ -871,6 +902,12 @@ function pruneMeta(){
     if(!known.has(n)){ delete meta[n]; dirty = true; }
   if(dirty) saveMeta();
 }
+// load the named prompt presets once (see summarize-prompts.nix); absent/broken
+// file just means no preset dropdown — the free-text prompt box still works
+fetch('/prompts.json', {cache:'no-store'})
+  .then(r => r.ok ? r.json() : {})
+  .then(p => { presets = (p && typeof p === 'object') ? p : {}; render(); })
+  .catch(() => {});
 setInterval(tick, 1000);
 setInterval(() => { poll().then(pruneMeta); }, POLL_MS);
 poll().then(pruneMeta);

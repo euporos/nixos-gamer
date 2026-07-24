@@ -355,6 +355,13 @@ let
     '';
   };
 
+  # Named summarization prompt presets (summarize-prompts.nix) rendered to a
+  # JSON name->text map. The UI fetches it on load to populate the summarize
+  # preset dropdown; the worker is untouched (a preset is just prompt text).
+  # Editing that file + `nix run .#deploy` is the whole "add a prompt" workflow.
+  summaryPromptsDir = pkgs.writeTextDir "prompts.json"
+    (builtins.toJSON (import ./summarize-prompts.nix));
+
   # Read-only JSON directory listing for the UI's status polling.
   statusListing = dir: {
     alias = dir;
@@ -403,6 +410,15 @@ in
       locations."= /" = {
         root = "${./whisper-ui}";
         tryFiles = "/index.html =404";
+        extraConfig = ''
+          add_header Cache-Control "no-cache";
+        '';
+      };
+      # Named summary prompt presets (summarize-prompts.nix). Exact-match so it
+      # never shadows the PUT-only inbox at "/".
+      locations."= /prompts.json" = {
+        root = "${summaryPromptsDir}";
+        tryFiles = "/prompts.json =404";
         extraConfig = ''
           add_header Cache-Control "no-cache";
         '';

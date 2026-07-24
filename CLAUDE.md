@@ -310,6 +310,17 @@ like transcripts.
   token estimate is now **informational** ("longer than one pass; will be
   condensed in chunks"), not a truncation blocker. The archive is not re-rendered
   while a prompt textarea is focused, so polling never eats keystrokes.
+- **Named prompt presets** (`summarize-prompts.nix`): a standalone Nix attrset
+  of `name → prompt text` — the one place to add/experiment with reusable
+  summary prompts. `whisper.nix` renders it to `/prompts.json` (via
+  `pkgs.writeTextDir` + an exact-match nginx location, so it doesn't shadow the
+  PUT inbox at `/`); the UI fetches it once on load and shows a `preset…`
+  dropdown in each transcript's `+ prompt` box. Picking a preset just drops its
+  text into that transcript's prompt textarea (→ the spec's free-text `prompt`
+  as usual) — **the worker is untouched**, a preset is nothing but prompt text
+  keyed by a friendly name. Add a preset = add an attribute + `nix run .#deploy`.
+  Missing/broken `/prompts.json` just hides the dropdown; the free-text box still
+  works. Ships with one preset, `diary`.
 
 ## Electricity / idle power (`disk-spindown.nix`)
 
