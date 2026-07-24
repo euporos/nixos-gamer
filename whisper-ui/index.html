@@ -402,10 +402,12 @@ async function jfetch(url){
 }
 
 /* ---------- polling ---------- */
-// bare job ids of the *.json specs in a summary status listing
-const specIds = arr => new Set(arr
+// map of bare job id -> spec mtime (ms) for the *.json specs in a summary
+// status listing. A Map so `.has(jobid)` still works everywhere, plus `.get()`
+// gives the work/ mtime we clock a running job's elapsed time from.
+const specIds = arr => new Map(arr
   .filter(e => e.type === 'file' && e.name.endsWith('.json'))
-  .map(e => e.name.slice(0, -5)));
+  .map(e => [e.name.slice(0, -5), Date.parse(e.mtime)]));
 
 async function poll(){
   try{
@@ -582,7 +584,7 @@ function render(){
 function sumJobsFor(stem){
   return Object.entries(sumjobs)
     .filter(([, info]) => info.stem === stem)
-    .map(([jobid, info]) => ({jobid, label: info.label, ts: info.ts, state: sumState(jobid)}))
+    .map(([jobid, info]) => ({jobid, label: info.label, ts: info.ts, since: server.sumWork.get(jobid), state: sumState(jobid)}))
     .filter(j => j.state !== 'done')
     .sort((a, b) => (b.ts || 0) - (a.ts || 0));
 }
@@ -591,7 +593,7 @@ function sumJobsFor(stem){
 // Jobs section alongside transcriptions, which never run concurrently with them
 function sumJobList(){
   return Object.entries(sumjobs)
-    .map(([jobid, info]) => ({jobid, stem: info.stem, label: info.label, ts: info.ts, state: sumState(jobid)}))
+    .map(([jobid, info]) => ({jobid, stem: info.stem, label: info.label, ts: info.ts, since: server.sumWork.get(jobid), state: sumState(jobid)}))
     .filter(j => j.state !== 'done')
     .sort((a, b) => (b.ts || 0) - (a.ts || 0));
 }
@@ -604,6 +606,10 @@ function renderSumJobCard(j){
     ? `<button data-action="sum-cancel" data-jobid="${esc(j.jobid)}">cancel</button>`
     : `<button data-action="sum-dismiss" data-jobid="${esc(j.jobid)}">dismiss</button>`;
   const label = j.label ? `<span class="meta">${esc(j.label)}</span>` : '';
+  // no ETA — a summary's length varies (single-pass vs. chunked condense), so
+  // just tick up the elapsed time, clocked from when the spec entered work/
+  const elapsed = (j.state === 'running' && j.since)
+    ? `<span class="elapsed" data-since="${j.since}">${fmtElapsed(Date.now() - j.since)}</span>` : '';
   const bar = j.state === 'running' ? '<div class="bar indet"><i></i></div>' : '';
   return `<div class="job ${cls}">
     <div class="row">
@@ -611,6 +617,7 @@ function renderSumJobCard(j){
       <span class="badge ${cls}">${j.state}</span>
       <span class="name">${esc(j.stem)}</span>
       ${label}
+      ${elapsed}
       <span class="spacer"></span>
       <div class="actions">${act}</div>
     </div>${bar}
@@ -699,10 +706,12 @@ function renderSumJobChip(j){
   const cls = j.state === 'running' ? 'run' : j.state === 'failed' ? 'err'
             : j.state === 'cancelled' ? 'err' : '';
   const lbl = j.label ? ' · ' + esc(j.label) : '';
+  const elapsed = (j.state === 'running' && j.since)
+    ? ` · <span class="elapsed" data-since="${j.since}">${fmtElapsed(Date.now() - j.since)}</span>` : '';
   const act = (j.state === 'queued' || j.state === 'running')
     ? `<button data-action="sum-cancel" data-jobid="${esc(j.jobid)}">cancel</button>`
     : `<button data-action="sum-dismiss" data-jobid="${esc(j.jobid)}">dismiss</button>`;
-  return `<span class="sum-chip pending"><span class="jobstate ${cls}">summary · ${j.state}${lbl}</span>${act}</span>`;
+  return `<span class="sum-chip pending"><span class="jobstate ${cls}">summary · ${j.state}${lbl}${elapsed}</span>${act}</span>`;
 }
 
 const highlightSpeakers = text =>
