@@ -281,6 +281,17 @@ like transcripts.
     in the UI). A later job for the **same long stem** skips chunking entirely and
     does only the fast final render over the cached notes. Short transcripts never
     produce a notes file.
+  - **Live chunk progress**: while a chunked job runs, the worker publishes its
+    position as an **empty marker file** in `work/`, the counts encoded in the
+    filename: `<jobid>.progress.<phase>.<done>.<total>` (`phase` =
+    `condense`|`render`). One marker per job (previous unlinked before the next),
+    cleared in `process()`'s `finally`. The UI already polls the `work/`
+    autoindex, so it reads live progress from the **filename alone** — no body
+    fetch, no extra endpoint (the `specIds`/running-signal logic ignores non-JSON
+    names, so markers don't disturb it). Progress is cosmetic: a marker write that
+    fails never fails the job. The UI *also* predicts the chunk count up front
+    from the source size using the worker's own budget (`SUMMARIZE_CHUNK_CHARS` =
+    `max(1000, num_ctx−3800)·4` chars/chunk), shown in the long-transcript note.
 - **GPU lock (VRAM 11 GB, shared with whisper)**: Qwen3-14B weights are ~9 GB, so
   the two serialize via `flock` on `/run/whisper-gpu.lock` (`0660 root:whisper`).
   The worker takes it around **all** its Ollama calls for a job and holds it until

@@ -333,6 +333,14 @@ const NOTES_RE = /^(.+)\.notes\.md$/;
 // ~4 chars/token) when a transcript is longer than one pass and will therefore
 // be condensed in chunks by the summary worker
 const SUMMARIZE_NUM_CTX = 16384;
+// Mirror the worker's chunk budget (NOTES_RESERVE + OUTPUT_RESERVE +
+// SYSTEM_RESERVE = 3800 tok held back, ~4 chars/token) so the UI can PREDICT how
+// many condense chunks a long transcript will take, before the worker starts.
+const SUMMARIZE_CHUNK_CHARS = Math.max(1000, SUMMARIZE_NUM_CTX - 3800) * 4;
+const SUMMARIZE_SINGLE_PASS_TOKENS = Math.round(0.8 * SUMMARIZE_NUM_CTX);
+// a running chunked job publishes its position as an empty marker file in work/,
+// its filename carrying the counts: <jobid>.progress.<phase>.<done>.<total>
+const PROGRESS_RE = /^(.+)\.progress\.(condense|render)\.(\d+)\.(\d+)$/;
 // seconds of fixed overhead (container start + model load) added to the ETA
 const ETA_OVERHEAD_S = 90, RT_FACTOR = 15;
 
@@ -345,7 +353,8 @@ const meta = JSON.parse(localStorage.getItem('whisperui') || '{}');
 const saveMeta = () => localStorage.setItem('whisperui', JSON.stringify(meta));
 const uploads = {};            // name -> {pct, error}
 let server = {inbox:[], working:[], failed:[], transcripts:[],
-              sumInbox:new Set(), sumWork:new Set(), sumFailed:new Set(), ok:false};
+              sumInbox:new Set(), sumWork:new Set(), sumFailed:new Set(),
+              sumProgress:new Map(), ok:false};
 const expanded = new Set();    // stems (transcript preview) + summary filenames, open
 const previews = {};           // stem | summary-filename -> {text} | {error} | {loading}
 // per-transcript summarization extras, survives reloads (own key so pruneMeta,
@@ -409,6 +418,17 @@ const specIds = arr => new Map(arr
   .filter(e => e.type === 'file' && e.name.endsWith('.json'))
   .map(e => [e.name.slice(0, -5), Date.parse(e.mtime)]));
 
+// jobid -> {phase, done, total} from the progress markers in a work/ listing
+const progressMap = arr => {
+  const m = new Map();
+  for(const e of arr){
+    if(e.type !== 'file') continue;
+    const g = PROGRESS_RE.exec(e.name);
+    if(g) m.set(g[1], {phase: g[2], done: +g[3], total: +g[4]});
+  }
+  return m;
+};
+
 async function poll(){
   try{
     const [inbox, work, failed, transcripts, sInbox, sWork, sFailed] = await Promise.all([
@@ -428,7 +448,8 @@ async function poll(){
       }catch(e){ /* job dir vanished or not yet readable — next poll */ }
     }
     server = {inbox, working, failed, transcripts, ok:true,
-              sumInbox: specIds(sInbox), sumWork: specIds(sWork), sumFailed: specIds(sFailed)};
+              sumInbox: specIds(sInbox), sumWork: specIds(sWork), sumFailed: specIds(sFailed),
+              sumProgress: progressMap(sWork)};
     // an upload the server now knows about is no longer "uploading"
     for(const n of Object.keys(uploads)){
       if(!uploads[n].error &&
@@ -584,7 +605,7 @@ function render(){
 function sumJobsFor(stem){
   return Object.entries(sumjobs)
     .filter(([, info]) => info.stem === stem)
-    .map(([jobid, info]) => ({jobid, label: info.label, ts: info.ts, since: server.sumWork.get(jobid), state: sumState(jobid)}))
+    .map(([jobid, info]) => ({jobid, label: info.label, ts: info.ts, since: server.sumWork.get(jobid), prog: server.sumProgress.get(jobid), state: sumState(jobid)}))
     .filter(j => j.state !== 'done')
     .sort((a, b) => (b.ts || 0) - (a.ts || 0));
 }
@@ -593,9 +614,18 @@ function sumJobsFor(stem){
 // Jobs section alongside transcriptions, which never run concurrently with them
 function sumJobList(){
   return Object.entries(sumjobs)
-    .map(([jobid, info]) => ({jobid, stem: info.stem, label: info.label, ts: info.ts, since: server.sumWork.get(jobid), state: sumState(jobid)}))
+    .map(([jobid, info]) => ({jobid, stem: info.stem, label: info.label, ts: info.ts, since: server.sumWork.get(jobid), prog: server.sumProgress.get(jobid), state: sumState(jobid)}))
     .filter(j => j.state !== 'done')
     .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+}
+
+// live progress of a running summary job (empty unless the worker is chunking):
+// "condensing 3/12" during the condense passes, "rendering summary" for the
+// final render over the completed/cached notes
+function sumProgressText(prog){
+  if(!prog) return '';
+  if(prog.phase === 'condense') return `condensing ${prog.done}/${prog.total}`;
+  return 'rendering summary';
 }
 
 // a summary job rendered as a top-of-page Jobs card (mirrors a transcription
@@ -610,13 +640,22 @@ function renderSumJobCard(j){
   // just tick up the elapsed time, clocked from when the spec entered work/
   const elapsed = (j.state === 'running' && j.since)
     ? `<span class="elapsed" data-since="${j.since}">${fmtElapsed(Date.now() - j.since)}</span>` : '';
-  const bar = j.state === 'running' ? '<div class="bar indet"><i></i></div>' : '';
+  const ptxt = j.state === 'running' ? sumProgressText(j.prog) : '';
+  const prog = ptxt ? `<span class="meta">${esc(ptxt)}</span>` : '';
+  // during a chunked condense the bar can be determinate (done/total); otherwise
+  // (single pass, final render, unknown) fall back to the indeterminate sweep
+  const bar = j.state === 'running'
+    ? (j.prog && j.prog.phase === 'condense' && j.prog.total > 0
+        ? `<div class="bar"><i style="width:${Math.round(100 * j.prog.done / j.prog.total)}%"></i></div>`
+        : '<div class="bar indet"><i></i></div>')
+    : '';
   return `<div class="job ${cls}">
     <div class="row">
       <span class="badge kind">summary</span>
       <span class="badge ${cls}">${j.state}</span>
       <span class="name">${esc(j.stem)}</span>
       ${label}
+      ${prog}
       ${elapsed}
       <span class="spacer"></span>
       <div class="actions">${act}</div>
@@ -671,11 +710,19 @@ function renderGroup(g){
     : '';
 
   // long-transcript note (rough client-side estimate) — informational, not a
-  // blocker: the worker condenses long inputs in chunks instead of truncating
+  // blocker: the worker condenses long inputs in chunks instead of truncating.
+  // We predict the chunk count from the source size using the worker's own
+  // budget, so the user sees roughly how many passes it will take up front.
   const tok = estTokens(g);
-  const warn = tok > SUMMARIZE_NUM_CTX
-    ? `<div class="sum-warn">~${tok.toLocaleString()} tokens — longer than one ${SUMMARIZE_NUM_CTX.toLocaleString()}-token pass; it will be condensed in chunks (a .notes.md cache is kept).</div>`
-    : '';
+  let warn = '';
+  if(tok > SUMMARIZE_SINGLE_PASS_TOKENS){
+    const bytes = g.speakersBytes || g.txtBytes || 0;
+    const chunks = Math.ceil(bytes / SUMMARIZE_CHUNK_CHARS);
+    const how = g.notes
+      ? 'a .notes.md cache already exists, so a repeat summary skips chunking and does just the final render pass'
+      : `it will be condensed in ~${chunks} chunk${chunks === 1 ? '' : 's'} (a .notes.md cache is kept)`;
+    warn = `<div class="sum-warn">~${tok.toLocaleString()} tokens — more than fits in one ${SUMMARIZE_NUM_CTX.toLocaleString()}-token pass; ${how}.</div>`;
+  }
   const err = summaryErr[g.stem]
     ? `<div class="sum-err">${esc(summaryErr[g.stem])}</div>` : '';
 
@@ -706,12 +753,14 @@ function renderSumJobChip(j){
   const cls = j.state === 'running' ? 'run' : j.state === 'failed' ? 'err'
             : j.state === 'cancelled' ? 'err' : '';
   const lbl = j.label ? ' · ' + esc(j.label) : '';
+  const ptxt = j.state === 'running' ? sumProgressText(j.prog) : '';
+  const prog = ptxt ? ' · ' + esc(ptxt) : '';
   const elapsed = (j.state === 'running' && j.since)
     ? ` · <span class="elapsed" data-since="${j.since}">${fmtElapsed(Date.now() - j.since)}</span>` : '';
   const act = (j.state === 'queued' || j.state === 'running')
     ? `<button data-action="sum-cancel" data-jobid="${esc(j.jobid)}">cancel</button>`
     : `<button data-action="sum-dismiss" data-jobid="${esc(j.jobid)}">dismiss</button>`;
-  return `<span class="sum-chip pending"><span class="jobstate ${cls}">summary · ${j.state}${lbl}${elapsed}</span>${act}</span>`;
+  return `<span class="sum-chip pending"><span class="jobstate ${cls}">summary · ${j.state}${prog}${lbl}${elapsed}</span>${act}</span>`;
 }
 
 const highlightSpeakers = text =>

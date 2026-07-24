@@ -403,17 +403,22 @@ let
                     log("%s: reusing cached notes for %s" % (jobid, stem))
                     with open(npath, encoding="utf-8", errors="replace") as f:
                         notes = f.read()
+                    total_chunks = 0
                 else:
                     chunks = chunk_by_lines(text, chunk_char_budget)
-                    log("%s: chunked condense over %d chunk(s) (~%d tok)" % (jobid, len(chunks), tok))
+                    total_chunks = len(chunks)
+                    log("%s: chunked condense over %d chunk(s) (~%d tok)" % (jobid, total_chunks, tok))
                     notes = ""
+                    set_progress(jobid, "condense", 0, total_chunks)
                     for i, ch in enumerate(chunks, 1):
                         cancel_check()
                         notes = call_ollama(model, condense_messages(notes, ch),
                                             CONDENSE_KEEP_ALIVE, temperature, num_ctx, cancel_check)
-                        log("%s: condensed chunk %d/%d" % (jobid, i, len(chunks)))
+                        set_progress(jobid, "condense", i, total_chunks)
+                        log("%s: condensed chunk %d/%d" % (jobid, i, total_chunks))
                     notes_to_write = notes
                 cancel_check()
+                set_progress(jobid, "render", total_chunks, total_chunks)
                 summary = call_ollama(model, render_messages(notes, prompt, language, True, target_words),
                                       0, temperature, num_ctx, cancel_check)
             wait_unloaded(model)
@@ -460,6 +465,30 @@ let
             except OSError:
                 pass
 
+    # ---- live chunk progress -------------------------------------------------
+    # A running chunked job publishes its position as an EMPTY marker file whose
+    # NAME carries the counts: work/<jobid>.progress.<phase>.<done>.<total>
+    # (phase is "condense" or "render"). The UI already fetches the work/ autoindex
+    # every poll, so it reads live progress from the filename alone — no body
+    # fetch, no extra endpoint. One marker per job; we unlink the previous before
+    # writing the next, and clear it in process()'s finally. Progress is cosmetic:
+    # a failed marker write must never fail the job.
+
+    def clear_progress(jobid):
+        for p in glob.glob(os.path.join(WORK, jobid + ".progress.*")):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    def set_progress(jobid, phase, done, total):
+        clear_progress(jobid)
+        name = "%s.progress.%s.%d.%d" % (jobid, phase, done, total)
+        try:
+            open(os.path.join(WORK, name), "w").close()
+        except OSError:
+            pass
+
     def process(inbox_path):
         base = os.path.basename(inbox_path)
         if not base.endswith(".json"):
@@ -495,6 +524,7 @@ let
                 pass
         finally:
             clear_cancel(jobid)
+            clear_progress(jobid)
 
     def main():
         for p in sorted(glob.glob(os.path.join(INBOX, "*.json"))):
