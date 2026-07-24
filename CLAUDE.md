@@ -218,9 +218,17 @@ like transcripts.
   trick as `/control/`, no dav+alias pitfall). Spec keys: **`stem`** (required —
   worker reads `<stem>.speakers.txt` preferred else `<stem>.txt` from
   `transcripts/`, same path-safety: bare name canonicalizing to a direct child),
-  plus optional `prompt`, `language`, `model`, `num_ctx`, `temperature`, `label`
-  (UI display only). `<jobid>` is a UI-generated id; the stem lives *inside* the
-  spec (prompt is free text, can't be a filename).
+  plus optional `prompt`, `language`, `model`, `num_ctx`, `temperature`,
+  `target_words`, `label` (UI display only). `<jobid>` is a UI-generated id; the
+  stem lives *inside* the spec (prompt is free text, can't be a filename).
+- **Target length**: every summary has a word target — **`target_words`** in the
+  spec, default **500** (`SUMMARIZE_TARGET_WORDS`), a strict **±10%** range
+  (450–550 for the default). The render pass states the target and the hard
+  bounds in both the system and user roles so length compliance beats stylistic
+  drift; it applies **only to the final render** (single-pass and from-notes),
+  never to the purpose-neutral per-chunk condense. The UI exposes it as a
+  per-transcript number input next to the `+ prompt` box (persisted under
+  `whispersumwords`).
 - **Poll**: `/status/summaries/{inbox,work,failed}/` autoindex-JSON listings.
 - **Cancel**: `PUT /summaries/control/<jobid>.cancel` (see cancel semantics below).
 - **Result**: `<stem>.summary[.N].md` in `/srv/whisper/transcripts/` (race-free

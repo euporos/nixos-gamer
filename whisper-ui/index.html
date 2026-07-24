@@ -205,6 +205,15 @@
   }
   textarea.sum-extra::placeholder{color:var(--faint)}
   textarea.sum-extra:focus-visible{outline:1px solid var(--amber-hi);outline-offset:2px;border-color:var(--amber)}
+  label.sum-words{
+    display:flex;align-items:center;gap:6px;margin-top:8px;
+    color:var(--faint);font-size:12px;
+  }
+  label.sum-words input{
+    width:74px;padding:5px 7px;font-family:inherit;font-size:12px;
+    color:var(--ink);background:var(--bg);border:1px solid var(--faint);
+  }
+  label.sum-words input:focus-visible{outline:1px solid var(--amber-hi);outline-offset:2px;border-color:var(--amber)}
   .sums{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px}
   .sums .lbl{
     color:var(--faint);font-size:10px;letter-spacing:.2em;text-transform:uppercase;
@@ -334,6 +343,11 @@ const previews = {};           // stem | summary-filename -> {text} | {error} | 
 // which only tracks in-flight jobs, never drops it)
 const prompts = JSON.parse(localStorage.getItem('whisperprompts') || '{}');
 const savePrompts = () => localStorage.setItem('whisperprompts', JSON.stringify(prompts));
+// per-transcript target summary length in words (default 500, strict +-10% is
+// enforced server-side). Own key, same survival rationale as prompts.
+const DEFAULT_TARGET_WORDS = 500;
+const sumWords = JSON.parse(localStorage.getItem('whispersumwords') || '{}');
+const saveSumWords = () => localStorage.setItem('whispersumwords', JSON.stringify(sumWords));
 const promptOpen = new Set();  // stems whose extra-prompt textarea is shown
 // in-flight async summary jobs: jobid -> {stem, label, ts, seen, cancelled}.
 // Single-user attribution (jobid->stem) lives here, in localStorage — the
@@ -592,7 +606,8 @@ function renderGroup(g){
 
   // collapsible per-transcript extra-prompt textarea
   const promptBox = promptOpen.has(g.stem)
-    ? `<textarea class="sum-extra" data-stem="${esc(g.stem)}" rows="3" placeholder="extra summarizer instructions — e.g. 'focus on decisions & action items', 'in English', 'three bullet points'">${esc(prompts[g.stem] || '')}</textarea>`
+    ? `<textarea class="sum-extra" data-stem="${esc(g.stem)}" rows="3" placeholder="extra summarizer instructions — e.g. 'focus on decisions & action items', 'in English', 'three bullet points'">${esc(prompts[g.stem] || '')}</textarea>
+       <label class="sum-words">target length <input type="number" min="50" step="50" data-words-stem="${esc(g.stem)}" value="${sumWords[g.stem] || DEFAULT_TARGET_WORDS}"> words (strict &plusmn;10%)</label>`
     : '';
 
   // long-transcript note (rough client-side estimate) — informational, not a
@@ -702,9 +717,13 @@ document.addEventListener('click', async ev => {
 // keep the per-transcript extra-prompt text as it is typed (survives reloads)
 document.addEventListener('input', ev => {
   const ta = ev.target.closest('textarea[data-stem]');
-  if(!ta) return;
-  prompts[ta.dataset.stem] = ta.value;
-  savePrompts();
+  if(ta){ prompts[ta.dataset.stem] = ta.value; savePrompts(); return; }
+  const wi = ev.target.closest('input[data-words-stem]');
+  if(wi){
+    const n = parseInt(wi.value, 10);
+    if(n > 0) sumWords[wi.dataset.wordsStem] = n; else delete sumWords[wi.dataset.wordsStem];
+    saveSumWords();
+  }
 });
 
 // generate a filename-safe, collision-unlikely job id
@@ -719,8 +738,10 @@ const newJobId = () =>
 async function summarize(stem){
   const jobid = newJobId();
   const prompt = prompts[stem] || '';
-  const spec = {stem, prompt};
-  const label = prompt.trim().replace(/\s+/g, ' ').slice(0, 40);
+  const target_words = sumWords[stem] || DEFAULT_TARGET_WORDS;
+  const spec = {stem, prompt, target_words};
+  const label = ((prompt.trim() ? prompt.trim() + ' · ' : '') + target_words + 'w')
+    .replace(/\s+/g, ' ').slice(0, 40);
   sumjobs[jobid] = {stem, label, ts: Date.now(), seen: false};
   saveSumjobs();
   delete summaryErr[stem];

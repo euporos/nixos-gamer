@@ -31,6 +31,10 @@
 #     "model":       "qwen3:14b",            # optional override
 #     "num_ctx":     16384,                  # optional override (default 16384)
 #     "temperature": 0.3,                    # optional override
+#     "target_words":500,                    # optional: target FINAL summary length
+#                                            #   in words (default 500). Enforced with
+#                                            #   a strict +-10% margin in the render
+#                                            #   pass; does not affect chunk condense.
 #     "label":       "action items"          # optional: UI display label; ignored here
 #   }
 #
@@ -72,6 +76,11 @@ let
     NAS_ROOT    = os.environ.get("SUMMARIZE_NAS_ROOT", "")
     NUM_CTX     = int(os.environ.get("SUMMARIZE_NUM_CTX", "16384"))
     TEMPERATURE = float(os.environ.get("SUMMARIZE_TEMPERATURE", "0.3"))
+    # Target length of the FINAL summary, in words. Enforced with a strict +-10%
+    # margin in the render pass (see render_messages). Applies only to the final
+    # output, never to the purpose-neutral per-chunk condense (which must keep
+    # everything). Overridable per job via the spec's "target_words" key.
+    TARGET_WORDS = int(os.environ.get("SUMMARIZE_TARGET_WORDS", "500"))
     # GPU mutex shared with the whisper worker (which flock()s the same file
     # around each container run). Created by tmpfiles as 0660 root:whisper; the
     # root worker opens it read-only, which is enough for an exclusive flock.
@@ -271,11 +280,27 @@ let
 
     # ---- prompt assembly + chunking -----------------------------------------
 
-    def render_messages(material, prompt, language, from_notes):
+    def render_messages(material, prompt, language, from_notes, target_words):
         system = BASE_SYSTEM
         if language:
             system += " Write the summary in " + language + "."
-        user = []
+        # Strict length target on the FINAL summary. +-10% is a HARD range; the
+        # bounds are stated explicitly so the model has a concrete target, not a
+        # vague "about". This is stressed both in the system role and as the first,
+        # last-word user instruction so it is not buried under any purpose prompt.
+        lo = int(round(target_words * 0.9))
+        hi = int(round(target_words * 1.1))
+        length_rule = (
+            "LENGTH REQUIREMENT (STRICT): the summary MUST be approximately %d "
+            "words. This is a hard constraint — stay within %d-%d words (a strict "
+            "+-10%% margin). Do not fall short of %d words and do not exceed %d "
+            "words. Adjust the level of detail to hit this target: expand with more "
+            "faithful detail if you would otherwise be too short, condense if you "
+            "would otherwise be too long. Length compliance takes priority over "
+            "any stylistic preference." % (target_words, lo, hi, lo, hi)
+        )
+        system += " " + length_rule
+        user = [length_rule]
         if prompt and prompt.strip():
             user.append("Additional instructions:\n" + prompt.strip())
         label = "Notes distilled from the transcript" if from_notes else "Transcript"
@@ -326,6 +351,9 @@ let
         temperature = float(spec.get("temperature", TEMPERATURE))
         prompt = spec.get("prompt") or ""
         language = spec.get("language") or None
+        target_words = int(spec.get("target_words") or TARGET_WORDS)
+        if target_words < 1:
+            target_words = TARGET_WORDS
 
         single_pass_limit = int(SINGLE_PASS_FRACTION * num_ctx)
         chunk_tok_budget = max(1000, num_ctx - NOTES_RESERVE - OUTPUT_RESERVE - SYSTEM_RESERVE)
@@ -343,7 +371,7 @@ let
         try:
             if not long_job:
                 log("%s: single pass (~%d tok, stem=%s)" % (jobid, tok, stem))
-                summary = call_ollama(model, render_messages(text, prompt, language, False),
+                summary = call_ollama(model, render_messages(text, prompt, language, False, target_words),
                                       0, temperature, num_ctx)
             else:
                 if have_notes:
@@ -361,7 +389,7 @@ let
                         log("%s: condensed chunk %d/%d" % (jobid, i, len(chunks)))
                     notes_to_write = notes
                 cancel_check()
-                summary = call_ollama(model, render_messages(notes, prompt, language, True),
+                summary = call_ollama(model, render_messages(notes, prompt, language, True, target_words),
                                       0, temperature, num_ctx)
             wait_unloaded(model)
             warm = False
@@ -543,6 +571,9 @@ in
       # flash-attn + q8_0 KV (see services.ollama.environmentVariables).
       SUMMARIZE_NUM_CTX = "16384";
       SUMMARIZE_TEMPERATURE = "0.3";
+      # Default FINAL-summary length in words; strict +-10% enforced in the
+      # render pass. Per-job overridable via the spec's "target_words".
+      SUMMARIZE_TARGET_WORDS = "500";
       GPU_LOCK = "/run/whisper-gpu.lock";
       # Best-effort NAS delivery of saved summaries + notes, one folder per
       # transcript — the same target the whisper worker uses.
