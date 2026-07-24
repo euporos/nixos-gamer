@@ -273,9 +273,13 @@ like transcripts.
   moves its spec `inbox → failed` and clears the sentinel. A **running** job —
   control hands the sentinel to the worker by moving it to `work/<jobid>.cancel`
   (this **empties `control/`** so its `DirectoryNotEmpty` path unit doesn't
-  busy-loop), and the worker aborts at the **next chunk boundary** (an in-flight
-  Ollama generation is never killed). The worker also checks `control/` directly
-  in case control hasn't run yet. Stale sentinels are just cleared.
+  busy-loop). The worker's Ollama calls are **streamed** and poll the sentinel
+  between tokens (`call_ollama(..., cancel_check)`), so a cancel **aborts the
+  in-flight generation** — closing the HTTP connection makes Ollama stop
+  generating (it cancels on client disconnect), freeing the GPU within ~a token
+  rather than waiting for the chunk to finish. The sentinel is also checked at
+  each chunk boundary and in `control/` directly (in case control hasn't run
+  yet). Stale sentinels are just cleared.
 - **Context window**: `num_ctx` (16k, `SUMMARIZE_NUM_CTX`) is capped by VRAM, not
   Qwen3 (native 32k): ~9 GB weights leave ~2 GB for KV; fp16 KV is ~0.16 MB/token
   (40 layers, 8 GQA KV heads, head-dim 128) → 16k would need ~2.6 GB and spill.

@@ -217,11 +217,19 @@ let
 
     # ---- Ollama --------------------------------------------------------------
 
-    def call_ollama(model, messages, keep_alive, temperature, num_ctx):
+    # Streamed so a cancel can abort an in-flight generation, not just land at the
+    # next chunk boundary. We read the NDJSON token stream and call cancel_check()
+    # between tokens; on cancel it raises, we leave the with-block, and closing the
+    # socket makes Ollama stop generating (it cancels a request on client
+    # disconnect) — freeing the GPU immediately. The check is throttled (a
+    # filesystem stat per token would be wasteful); the read timeout still guards a
+    # silent stall. keep_alive is honored the same as before (a done chunk stays
+    # warm); a cancelled one is force-unloaded by run_job's finally.
+    def call_ollama(model, messages, keep_alive, temperature, num_ctx, cancel_check=None):
         payload = {
             "model": model,
             "messages": messages,
-            "stream": False,
+            "stream": True,
             "think": False,  # Qwen3 is a thinking model; off for clean, fast output
             "keep_alive": keep_alive,
             "options": {"temperature": temperature, "num_ctx": num_ctx},
@@ -229,9 +237,24 @@ let
         data = json.dumps(payload).encode("utf-8")
         r = urllib.request.Request(OLLAMA + "/api/chat", data=data,
                                    headers={"Content-Type": "application/json"})
+        parts, last_check = [], 0.0
         with urllib.request.urlopen(r, timeout=1800) as resp:
-            out = json.load(resp)
-        return THINK_RE.sub("", out["message"]["content"]).strip()
+            for line in resp:               # one JSON object per line (NDJSON)
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                if obj.get("error"):
+                    raise RuntimeError("ollama: " + str(obj["error"]))
+                parts.append((obj.get("message") or {}).get("content", ""))
+                if obj.get("done"):
+                    break
+                if cancel_check is not None:
+                    now = time.monotonic()
+                    if now - last_check >= 0.25:  # throttle the cancel poll
+                        last_check = now
+                        cancel_check()  # raises -> with-block closes -> Ollama aborts
+        return THINK_RE.sub("", "".join(parts)).strip()
 
     def force_unload(model):
         # Evict the model now (used when a job is cancelled/errors while the model
@@ -372,7 +395,7 @@ let
             if not long_job:
                 log("%s: single pass (~%d tok, stem=%s)" % (jobid, tok, stem))
                 summary = call_ollama(model, render_messages(text, prompt, language, False, target_words),
-                                      0, temperature, num_ctx)
+                                      0, temperature, num_ctx, cancel_check)
             else:
                 if have_notes:
                     log("%s: reusing cached notes for %s" % (jobid, stem))
@@ -385,12 +408,12 @@ let
                     for i, ch in enumerate(chunks, 1):
                         cancel_check()
                         notes = call_ollama(model, condense_messages(notes, ch),
-                                            CONDENSE_KEEP_ALIVE, temperature, num_ctx)
+                                            CONDENSE_KEEP_ALIVE, temperature, num_ctx, cancel_check)
                         log("%s: condensed chunk %d/%d" % (jobid, i, len(chunks)))
                     notes_to_write = notes
                 cancel_check()
                 summary = call_ollama(model, render_messages(notes, prompt, language, True, target_words),
-                                      0, temperature, num_ctx)
+                                      0, temperature, num_ctx, cancel_check)
             wait_unloaded(model)
             warm = False
         finally:
@@ -418,8 +441,10 @@ let
     # A cancel is a <jobid>.cancel sentinel. summarize-control hands a running
     # job's sentinel to us by moving it into work/ (so control/ empties and its
     # path unit doesn't re-trigger); we also check control/ directly in case the
-    # control service hasn't run yet. Best-effort: an in-flight Ollama generation
-    # is never aborted — only the boundary between chunk passes is a cancel point.
+    # control service hasn't run yet. The sentinel is polled both at chunk
+    # boundaries and, via call_ollama's cancel_check, mid-generation — so an
+    # in-flight Ollama call is aborted (client disconnect) rather than run to
+    # completion, releasing the GPU within ~a token of the cancel landing.
 
     def cancel_pending(jobid):
         return (os.path.exists(os.path.join(WORK, jobid + ".cancel"))
@@ -481,7 +506,7 @@ let
   #   - running (spec in work/)  -> hand the sentinel to the worker by moving it
   #                                 to work/<jobid>.cancel (this empties control/
   #                                 so the path unit stops re-triggering; the
-  #                                 worker aborts between chunk passes)
+  #                                 worker aborts the in-flight Ollama generation)
   #   - stale   (neither)        -> just clear the sentinel
   # Every sentinel is consumed each run, so DirectoryNotEmpty never busy-loops.
   controlSh = pkgs.writeShellApplication {
