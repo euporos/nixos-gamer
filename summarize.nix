@@ -104,11 +104,13 @@ let
 
     BASE_SYSTEM = (
         "You are a precise transcript summarizer. Summarize the material the user "
-        "provides. Unless the user explicitly asks for another language, write the "
-        "summary in the same language as the transcript. Be faithful: never invent "
-        "facts, figures, names, dates, or decisions that are not present. Keep "
-        "speaker attributions where they matter. Prefer clear structure (short "
-        "paragraphs or bullet points)."
+        "provides. Write the summary in the same language as the transcript, EVEN "
+        "IF these instructions (or any additional instructions) are written in a "
+        "different language — the instruction language never dictates the output "
+        "language. Only write in another language when explicitly told to via the "
+        "language setting. Be faithful: never invent facts, figures, names, dates, "
+        "or decisions that are not present. Keep speaker attributions where they "
+        "matter. Prefer clear structure (short paragraphs or bullet points)."
     )
 
     # Purpose-NEUTRAL condense instruction — used per chunk. It must NOT follow the
