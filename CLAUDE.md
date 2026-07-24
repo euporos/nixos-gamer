@@ -249,6 +249,24 @@ like transcripts.
   never to the purpose-neutral per-chunk condense. The UI exposes it as a
   per-transcript number input next to the `+ prompt` box (persisted under
   `whispersumwords`).
+- **Output language** (`detect_language` in `summarize.nix`): the summary must
+  come out in the transcript's language, but **you cannot rely on the model to
+  infer "same language as the transcript"** — it's reliable in the single-pass
+  render, but the chunked path's condense step (an all-English instruction
+  scaffold building bullet notes) silently flips the running-**notes** to
+  English, and the render then faithfully mirrors the now-English notes → an
+  English summary of a German talk. Worse, the poisoned `<stem>.notes.md` cache
+  makes every *future* summary of that stem English too. Fix: the worker
+  **auto-detects** the transcript language (cheap stopword/Cyrillic heuristic
+  over the whole transcript, limited to the pipeline's `de/en/fr/ru`) and states
+  it **explicitly** ("Write the notes/summary in German…") in *every* pass —
+  condense and render. The spec's optional `language` overrides detection; an
+  ambiguous ~50/50 bilingual mix detects nothing and falls back to the generic
+  instruction. **Mixed-language transcripts** (German with interspersed English)
+  detect the **dominant** language (counts aren't close) and force it, which
+  keeps the summary coherent instead of drifting. **Diagnose** a wrong-language
+  summary by `head`-ing `<stem>.notes.md` — if the *notes* are already the wrong
+  language, delete the cache and re-summarize so the corrected condense reruns.
 - **Poll**: `/status/summaries/{inbox,work,failed}/` autoindex-JSON listings.
 - **Cancel**: `PUT /summaries/control/<jobid>.cancel` (see cancel semantics below).
 - **Result**: `<stem>.summary[.N].md` in `/srv/whisper/transcripts/` (race-free

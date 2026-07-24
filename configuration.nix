@@ -174,6 +174,9 @@
     htop
     file
     jq
+    python3      # on $PATH for ad-hoc scripts / debugging (the summarize worker
+                 # runs its own pinned python via an absolute store path, so this
+                 # is only for interactive use, not a dependency of any service)
     cifs-utils   # mount.cifs helper for the NAS mount above
   ];
 
