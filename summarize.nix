@@ -582,6 +582,33 @@ in
     };
   };
 
+  # Boot-race guard: keep ollama from coming up GPU-less. Ollama probes for CUDA
+  # GPUs exactly ONCE at startup and, finding none, silently runs on the CPU for
+  # the rest of the session (a 14B model on this Zen1 CPU is ~10-50x slower — jobs
+  # look "stuck", and a cancel can't interrupt the multi-minute prompt-eval). On
+  # this box /dev/nvidia-uvm (required for CUDA compute) is created ~2 min into
+  # boot (module load + the nvidia CDI generator), but stock ollama is ordered
+  # only After=network.target — so on an unlucky boot it probes first, sees no GPU,
+  # and never re-probes. Belt AND suspenders: order it after the CDI generator,
+  # and block start until the uvm device node actually exists. The wait is bounded
+  # (60s) so a genuinely GPU-less boot still reaches multi-user instead of hanging.
+  # If this ever trips, `systemctl restart ollama` re-probes and recovers live.
+  systemd.services.ollama = {
+    after = [ "nvidia-container-toolkit-cdi-generator.service" ];
+    wants = [ "nvidia-container-toolkit-cdi-generator.service" ];
+    serviceConfig.ExecStartPre = pkgs.writeShellScript "wait-nvidia-uvm" ''
+      i=0
+      while [ ! -e /dev/nvidia-uvm ]; do
+        i=$((i + 1))
+        if [ "$i" -gt 60 ]; then
+          echo "wait-nvidia-uvm: /dev/nvidia-uvm still absent after 60s; starting anyway (CPU fallback)" >&2
+          exit 0
+        fi
+        ${pkgs.coreutils}/bin/sleep 1
+      done
+    '';
+  };
+
   # The summarize worker: drains /srv/whisper/summaries/inbox one job at a time.
   # Root (like whisper-worker) — no DynamicUser, so summaries and the notes cache
   # are written directly with no read-only-filesystem workaround.

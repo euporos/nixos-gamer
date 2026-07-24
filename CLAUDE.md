@@ -38,6 +38,22 @@ from a machine without that alias needs it added first.
     ollama-cuda from source for sm_61 (not in the binary cache — a one-time
     remote build). Do **not** let the default CUDA float to 13.x — CUDA 13
     dropped Pascal at the compiler level, so 6.1 would no longer even build.
+  - **Ollama GPU boot race (silent CPU fallback).** Ollama probes for CUDA GPUs
+    **once at startup** and, finding none, runs **CPU-only** for the whole
+    session with no error — a 14B model on the Zen1 CPU is ~10-50x slower, so
+    jobs look "stuck" (a chunk takes 10+ min) and a cancel can't interrupt the
+    multi-minute prompt-eval. On this box `/dev/nvidia-uvm` (needed for CUDA
+    compute) isn't created until ~2 min into boot (module load + the nvidia CDI
+    generator), and stock ollama is ordered only `After=network.target`, so on an
+    unlucky boot it probes before the GPU exists and falls back. Fixed in
+    `summarize.nix`: `systemd.services.ollama` is ordered `after`/`wants` the
+    `nvidia-container-toolkit-cdi-generator.service` **and** has an `ExecStartPre`
+    that blocks (bounded 60s) until `/dev/nvidia-uvm` appears. **Diagnose** with
+    `journalctl -u ollama | grep "inference compute"` — want
+    `library=CUDA … GTX 1080 Ti`, **not** `id=cpu library=cpu total_vram="0 B"`;
+    or `curl -s localhost:11434/api/ps` — a loaded model must show
+    `size_vram` ≈ 9 GB (0 = on CPU). **Live recovery** (no reboot):
+    `systemctl restart ollama` re-probes and finds the card.
 - **The ESP is a tiny 96MB Windows-created partition** (`nvme0n1p1`, mounted at
   `/boot/efi`) shared with the Microsoft bootloader (~27MB). It is boxed in
   between the disk start and the Windows partitions, so it **cannot be grown**.
