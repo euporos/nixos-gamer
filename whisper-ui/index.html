@@ -840,8 +840,11 @@ async function summarize(stem){
   }
 }
 
+// Body must be NON-empty: nginx's WebDAV PUT rejects a zero-length body with
+// 500 ("PUT request body must be in a file"), so an empty sentinel never lands.
+// The control services only check the sentinel's existence, so any byte works.
 const sumControl = (jobid, verb) =>
-  fetch('/summaries/control/' + encodeURIComponent(jobid + '.' + verb), {method:'PUT', body:''});
+  fetch('/summaries/control/' + encodeURIComponent(jobid + '.' + verb), {method:'PUT', body:'1'});
 
 async function loadSummary(file){
   previews[file] = {loading:true};
@@ -853,8 +856,9 @@ async function loadSummary(file){
   render();
 }
 
+// Non-empty body required — see sumControl (nginx rejects a zero-length PUT).
 const control = (name, verb) =>
-  fetch('/control/' + encodeURIComponent(name + '.' + verb), {method:'PUT', body:''});
+  fetch('/control/' + encodeURIComponent(name + '.' + verb), {method:'PUT', body:'1'});
 
 async function loadPreview(stem){
   previews[stem] = {loading:true};

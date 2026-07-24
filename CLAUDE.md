@@ -154,7 +154,11 @@ This replaced the old hand-placed plaintext files
   PUTting `<name>.cancel` / `<name>.requeue` sentinels to `/control/`, handled
   by the `whisper-control` path unit (kills the `whisper-job` podman
   container, or moves files between inbox/ and failed/). A cancelled job's
-  audio lands in `failed/` like any failure.
+  audio lands in `failed/` like any failure. **Sentinel PUTs must have a
+  non-empty body**: nginx's WebDAV rejects a zero-length PUT with 500 (`PUT
+  request body must be in a file`), so the UI sends a 1-byte body (`control` /
+  `sumControl` in `index.html`) — the control services only test existence, so
+  the content is irrelevant. Same applies to the `/summaries/control/` cancels.
 - Upload: `curl -T file.m4a http://192.168.85.30:8990/` (nginx WebDAV PUT,
   atomic rename into `/srv/whisper/inbox`), or scp into that dir.
 - systemd path unit + 10-min sweep timer → `whisper-worker` (bash, runs as
