@@ -361,8 +361,21 @@ like transcripts.
   for summaries), never a bogus group. The `+ prompt` textarea (persisted under
   `whisperprompts`) and numbered `#N view/.md` summary chips are unchanged. The
   token estimate is now **informational** ("longer than one pass; will be
-  condensed in chunks"), not a truncation blocker. The archive is not re-rendered
-  while a prompt textarea is focused, so polling never eats keystrokes.
+  condensed in chunks"), not a truncation blocker.
+- **Poll must not clobber the archive** (`render()`): the 4s poll re-renders, and
+  a naive `#archive.innerHTML = …` replaces every node — which resets the scroll
+  offset of open transcript/summary `<pre>` previews and drops focus/caret in the
+  prompt textarea and the target-words input, every few seconds. Three defenses,
+  all required: (1) skip the rebuild entirely while *any* focused
+  textarea/input/select lives inside `#archive` (values live in
+  `prompts`/`sumWords`, so a later rebuild restores them); (2) compare the freshly
+  built markup against `archiveHtml` and skip when identical — the normal idle
+  case; (3) when it did change, carry the `scrollTop` of every `[data-scroll]`
+  preview across the swap (keys `t:<stem>` / `s:<summary file>`). For (2) to be
+  worth anything the markup must be **time-invariant**: per-second counters are
+  emitted as *empty* `<span class="elapsed" data-since=…>` and filled in place by
+  `tick()` (run at the end of `render()`), never interpolated into the HTML
+  string — otherwise a running job makes every poll "different" and rebuilds.
 - **Named prompt presets** (`summarize-prompts.nix`): a standalone Nix attrset
   of `name → prompt text` — the one place to add/experiment with reusable
   summary prompts. `whisper.nix` renders it to `/prompts.json` (via

@@ -376,6 +376,9 @@ let presets = {};
 const sumjobs = JSON.parse(localStorage.getItem('whispersumjobs') || '{}');
 const saveSumjobs = () => localStorage.setItem('whispersumjobs', JSON.stringify(sumjobs));
 const summaryErr = {};         // stem -> last queue-submission error string
+// last markup written into #archive — polling usually produces byte-identical
+// HTML, and re-assigning innerHTML anyway would reset preview scroll + focus
+let archiveHtml = null;
 
 /* ---------- helpers ---------- */
 const $ = sel => document.querySelector(sel);
@@ -587,15 +590,32 @@ function render(){
     ? jobsHtml : '<div class="empty">nothing queued, nothing running</div>';
 
   const groups = archiveGroups();
-  // Don't rebuild the archive while a prompt textarea is focused — replacing
-  // innerHTML would drop the caret. The text is saved to `prompts` on input, so
-  // a later rebuild (new transcript, toggle, summarize) restores it intact.
+  // Rebuilding #archive replaces every node, which resets the scroll offset of
+  // open previews and drops focus/caret in the prompt + target-length inputs —
+  // once per poll, i.e. every few seconds. Three defenses, cheapest first:
+  //  1. never rebuild while an archive form control is focused (typing, spinner,
+  //     select) — the values live in `prompts`/`sumWords`, so a later rebuild
+  //     restores them intact;
+  //  2. skip when the markup is identical to what is already on screen — the
+  //     common idle case, where polling changes nothing at all;
+  //  3. when it really changed, carry the open previews' scroll offsets over.
   const ae = document.activeElement;
-  const editing = ae && ae.tagName === 'TEXTAREA' && $('#archive').contains(ae);
-  if(!editing){
-    $('#archive').innerHTML = groups.length ? groups.map(renderGroup).join('')
-      : (server.ok ? '<div class="empty">no transcripts yet</div>'
-                   : '<div class="empty">server unreachable</div>');
+  const editing = ae && $('#archive').contains(ae) &&
+    (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT' || ae.tagName === 'SELECT');
+  const html = groups.length ? groups.map(renderGroup).join('')
+    : (server.ok ? '<div class="empty">no transcripts yet</div>'
+                 : '<div class="empty">server unreachable</div>');
+  if(!editing && html !== archiveHtml){
+    const scrolls = new Map();
+    document.querySelectorAll('#archive [data-scroll]').forEach(el => {
+      if(el.scrollTop) scrolls.set(el.dataset.scroll, el.scrollTop);
+    });
+    $('#archive').innerHTML = html;
+    archiveHtml = html;
+    document.querySelectorAll('#archive [data-scroll]').forEach(el => {
+      const top = scrolls.get(el.dataset.scroll);
+      if(top) el.scrollTop = top;
+    });
   }
 
   tick();
@@ -671,10 +691,12 @@ function renderGroup(g){
 
   // transcript preview
   const p = previews[g.stem];
+  // data-scroll = the key render() carries the scroll offset over with
+  const sk = `data-scroll="t:${esc(g.stem)}"`;
   const preview = !expanded.has(g.stem) ? ''
-    : p && p.text  ? `<pre class="preview">${highlightSpeakers(p.text)}</pre>`
-    : p && p.error ? `<pre class="preview">could not load preview: ${esc(p.error)}</pre>`
-    : `<pre class="preview">loading…</pre>`;
+    : p && p.text  ? `<pre class="preview" ${sk}>${highlightSpeakers(p.text)}</pre>`
+    : p && p.error ? `<pre class="preview" ${sk}>could not load preview: ${esc(p.error)}</pre>`
+    : `<pre class="preview" ${sk}>loading…</pre>`;
 
   // existing summaries: numbered view/download chips + inline preview of open ones
   const sums = g.summaries.length ? `<div class="sums">
@@ -686,7 +708,7 @@ function renderGroup(g){
     const inner = q && q.text  ? `<span class="n">#${s.n}</span>\n${esc(q.text)}`
                 : q && q.error ? `could not load summary #${s.n}: ${esc(q.error)}`
                 : `loading summary #${s.n}…`;
-    return `<pre class="summary">${inner}</pre>`;
+    return `<pre class="summary" data-scroll="s:${esc(s.name)}">${inner}</pre>`;
   }).join('');
 
   // in-flight / failed summary jobs for this transcript (queued/running/failed)
@@ -755,8 +777,11 @@ function renderSumJobChip(j){
   const lbl = j.label ? ' · ' + esc(j.label) : '';
   const ptxt = j.state === 'running' ? sumProgressText(j.prog) : '';
   const prog = ptxt ? ' · ' + esc(ptxt) : '';
+  // left empty on purpose — tick() (called at the end of render()) fills it in
+  // place, so this chip's markup stays stable across polls and the archive is
+  // not rebuilt once a second just because a counter moved
   const elapsed = (j.state === 'running' && j.since)
-    ? ` · <span class="elapsed" data-since="${j.since}">${fmtElapsed(Date.now() - j.since)}</span>` : '';
+    ? ` · <span class="elapsed" data-since="${j.since}"></span>` : '';
   const act = (j.state === 'queued' || j.state === 'running')
     ? `<button data-action="sum-cancel" data-jobid="${esc(j.jobid)}">cancel</button>`
     : `<button data-action="sum-dismiss" data-jobid="${esc(j.jobid)}">dismiss</button>`;
