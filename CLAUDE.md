@@ -145,43 +145,96 @@ This replaced the old hand-placed plaintext files
   `x-systemd.automount`) NAS mount and the path-triggered whisper worker ever
   need them — no boot-time race.
 
+## Storage model: the NAS is the source of truth
+
+Everything durable the pipeline produces lives on the NAS share, in **one folder
+per transcript**:
+
+```
+/media/NAS/Netspace/artifacts/transcriptions/
+  _inbox/         audio drop point — copy a file here from any machine
+  _failed/        failed + cancelled audio (UI "requeue" moves it back to _inbox/)
+  <stem>/         source audio + .txt/.srt/.vtt/.tsv/.json/.speakers.txt
+                  + <stem>.summary[.N].md + <stem>.notes.md
+```
+
+`/srv/whisper` on the SSD is now **pure scratch** and can be wiped at any time:
+`inbox/` (staging for HTTP/scp uploads), `work/` (the ext4 job dir podman
+bind-mounts — this must *not* move to CIFS), `control/` (UI sentinels) and
+`summaries/{inbox,work,failed,control}` (job specs). There is deliberately no
+local `transcripts/`, `processed/` or `failed/` any more.
+
+**Why**: with a local original plus a NAS "delivery copy", a transcript
+corrected by hand on the share was invisible — the summarizer re-read the
+untouched local file. One copy, one truth. The summarizer now reads the very
+file you edited.
+
+- **inotify does NOT work across CIFS.** Measured on this box: `inotifywait` on
+  a NAS dir saw *nothing* when a second machine created files there, while
+  `ls`/`stat` saw them immediately. So a systemd `.path` unit is blind to the
+  NAS drop dir — it is **polled** by `whisper-worker`'s timer, which is why that
+  timer is **30s** and no longer a 10-min safety net. That 30s is the pickup
+  latency for a file copied onto the share. The local `inbox/` keeps its
+  instant `.path` unit.
+- **NAS offline** (headless box, WoL — it happens): both workers probe the share
+  by *writing* a file (the automount trigger can look mounted when the CIFS
+  mount underneath failed, so only a create is conclusive) and **no-op** when it
+  is down. Queued audio and queued summary specs simply wait for the next sweep
+  — jobs are delayed, never dropped or failed. The UI shows a distinct
+  `nas unreachable` badge (separate from `offline`, which means the box itself
+  is unreachable). `summarize-worker`'s sweep is 1 min for the same retry reason.
+- nginx only ever **reads** the share (uploads still land in the local staging
+  inbox), so it needs no relaxation of its `ProtectSystem=strict` — verified
+  that a `ProtectSystem=strict` + `ProtectHome=yes` unit running as `nginx` can
+  read the mount as-is. Do not add NAS `ReadWritePaths` to nginx: resolving one
+  at unit start would trigger the automount and could keep nginx from starting
+  while the NAS is down, which is exactly when the UI needs to come up to say so.
+- Verified CIFS semantics this design leans on: `O_EXCL` create (summary
+  numbering), atomic `os.replace` (notes cache), and directory-mtime bump on
+  file create (the UI's listing cache).
+- **Migration**: `whisper-nas-migrate.service` (runs on every switch/boot,
+  ordered before `whisper-worker`) copies anything still in the old local
+  `transcripts/`, `processed/` and `failed/` into the NAS layout. It is
+  **non-destructive and idempotent** — never overwrites, never deletes, skips
+  what the NAS already has, and no-ops once those dirs are gone. **Cleanup after
+  migration is manual**: check the NAS, then `rm -rf /srv/whisper/{transcripts,processed,failed}`
+  on the box.
+
 ## Whisper transcription pipeline (`whisper.nix`)
 
 - Web UI: `http://192.168.85.30:8990/` — single static page
   (`whisper-ui/index.html`, no build step, no backend daemon). It polls nginx
-  `autoindex_format json` listings under `/status/{inbox,work,failed,transcripts}/`
-  to show all jobs (including CLI/scp uploads), and cancels/requeues by
+  `autoindex_format json` listings under
+  `/status/{inbox,nas-inbox,work,failed,transcripts}/` to show all jobs
+  (including CLI/scp/NAS-copy uploads), and cancels/requeues by
   PUTting `<name>.cancel` / `<name>.requeue` sentinels to `/control/`, handled
   by the `whisper-control` path unit (kills the `whisper-job` podman
-  container, or moves files between inbox/ and failed/). A cancelled job's
-  audio lands in `failed/` like any failure. **Sentinel PUTs must have a
+  container, or moves files between the inboxes and `_failed/`). A cancelled
+  job's audio lands in `_failed/` like any failure. **Sentinel PUTs must have a
   non-empty body**: nginx's WebDAV rejects a zero-length PUT with 500 (`PUT
   request body must be in a file`), so the UI sends a 1-byte body (`control` /
   `sumControl` in `index.html`) — the control services only test existence, so
   the content is irrelevant. Same applies to the `/summaries/control/` cancels.
-- Upload: `curl -T file.m4a http://192.168.85.30:8990/` (nginx WebDAV PUT,
-  atomic rename into `/srv/whisper/inbox`), or scp into that dir.
-- systemd path unit + 10-min sweep timer → `whisper-worker` (bash, runs as
-  root) → one-shot rootful podman job per file with `--device
-  nvidia.com/gpu=all` (CDI). No VRAM held between jobs; ~15× realtime.
-- Results in `/srv/whisper/transcripts/` (`.txt/.srt/.vtt/.tsv/.json` +
-  jq-generated `.speakers.txt`); audio → `processed/`, failures → `failed/`
-  (requeue = move back to inbox). Logs: `journalctl -u whisper-worker`.
-- **NAS delivery**: on success the worker also copies the output set into
-  `/media/NAS/Netspace/artifacts/transcriptions/<stem>/` — one folder per
-  transcript. The local `/srv/whisper/transcripts/` (flat) stays the source of
-  truth the web UI browses/polls; the NAS copy is the shareable deliverable.
-  Delivery is **best-effort**: the share is an automounted CIFS mount (`nofail`
-  + `x-systemd.automount`, `configuration.nix`) so an offline NAS only logs a
-  `WARN` and never fails a job — the local copy is retained and can be
-  re-synced. The CIFS `username=`/`password=` credentials are the `smb-secrets`
-  entry in the encrypted `secrets/secrets.yaml`, decrypted by sops-nix to
-  `/run/secrets/smb-secrets` at activation (see **Secrets (sops-nix)** below).
-  Until that entry has real values the mount can't authenticate and delivery
-  just WARNs. The mount is `dir_mode=0777`/`file_mode=0666` (not just the
-  owner `uid=1000`) so the non-root `DynamicUser` summarizer can also write
-  its `<stem>.summary*.md` deliverables into these folders (see the
-  Summarization pipeline's persistence note).
+- **Three ways to submit audio**, all equivalent once queued:
+  `curl -T file.m4a http://192.168.85.30:8990/` (nginx WebDAV PUT, atomic
+  rename into `/srv/whisper/inbox`) · scp into that dir · copy the file into
+  the NAS `_inbox/` from any machine (polled, ~30s).
+- systemd path unit (local inbox) + 30s sweep timer (the *only* trigger for
+  the NAS drop dir) → `whisper-worker` (bash, runs as root) → one-shot rootful
+  podman job per file with `--device nvidia.com/gpu=all` (CDI). No VRAM held
+  between jobs; ~15× realtime.
+- On success the whole job dir is **moved** to `<NAS>/…/transcriptions/<stem>/`:
+  `.txt/.srt/.vtt/.tsv/.json` + jq-generated `.speakers.txt`, plus the source
+  audio under its original upload name (so a `.2ch`/`.lang-XX` marker stays
+  visible). Failures → `_failed/` (requeue = move back to `_inbox/`). A NAS
+  write failure at that moment requeues the audio into the local inbox rather
+  than losing it. Logs: `journalctl -u whisper-worker`.
+- The CIFS `username=`/`password=` credentials are the `smb-secrets` entry in
+  the encrypted `secrets/secrets.yaml`, decrypted by sops-nix to
+  `/run/secrets/smb-secrets` at activation (see **Secrets (sops-nix)**). Until
+  that entry has real values the mount can't authenticate, and since the NAS is
+  the source of truth the pipeline then does nothing at all (see the NAS-offline
+  behavior above) rather than degrading to local-only.
 - The container user is uid 1001 == host user `whisper` (fixed uid, on
   purpose — bind-mounted job dirs rely on it).
 - The image's whisperx downloads its VAD model from a **dead S3 bucket**; the
@@ -236,8 +289,9 @@ like transcripts.
 - **Submit**: `PUT http://192.168.85.30:8990/summaries/inbox/<jobid>.json` with a
   spec body. nginx maps the URL onto the dir via `root = /srv/whisper` (same
   trick as `/control/`, no dav+alias pitfall). Spec keys: **`stem`** (required —
-  worker reads `<stem>.speakers.txt` preferred else `<stem>.txt` from
-  `transcripts/`, same path-safety: bare name canonicalizing to a direct child),
+  names the NAS archive folder `<stem>/`, from which the worker reads
+  `<stem>.speakers.txt` preferred else `<stem>.txt`; same path-safety as before:
+  a bare name that must canonicalize to a direct child of the archive root),
   plus optional `prompt`, `language`, `model`, `num_ctx`, `temperature`,
   `target_words`, `label` (UI display only). `<jobid>` is a UI-generated id; the
   stem lives *inside* the spec (prompt is free text, can't be a filename).
@@ -269,12 +323,21 @@ like transcripts.
   language, delete the cache and re-summarize so the corrected condense reruns.
 - **Poll**: `/status/summaries/{inbox,work,failed}/` autoindex-JSON listings.
 - **Cancel**: `PUT /summaries/control/<jobid>.cancel` (see cancel semantics below).
-- **Result**: `<stem>.summary[.N].md` in `/srv/whisper/transcripts/` (race-free
-  `O_EXCL` numbering — each summarize **appends** a new numbered summary), plus
-  for chunked jobs `<stem>.notes.md`. These stay in `transcripts/`, so the
-  existing archive grouping, UI polling, and NAS delivery all work unchanged.
+- **Result**: `<stem>.summary[.N].md` written **into the NAS `<stem>/` folder**,
+  beside the transcript it came from (race-free `O_EXCL` numbering — each
+  summarize **appends** a new numbered summary; `O_EXCL` verified working over
+  CIFS), plus for chunked jobs `<stem>.notes.md`. There is no separate delivery
+  step any more — the write *is* the delivery.
+- **Source of truth**: the worker reads the transcript straight off the share,
+  so **correcting a transcript by hand changes what the next summary is built
+  from**. That was the whole point of the NAS-as-truth change. The notes cache
+  would have reintroduced exactly that staleness for long transcripts (a repeat
+  job reuses `<stem>.notes.md` and skips the condense entirely), so the cache is
+  **mtime-invalidated**: `.notes.md` older than the transcript is treated as
+  absent and re-condensed. No manual cache deletion needed after an edit.
 - **systemd**: `summarize-worker.service` (oneshot, **root** — no DynamicUser) +
-  `.path` (`DirectoryNotEmpty=…/inbox`) + a 10-min sweep timer; and
+  `.path` (`DirectoryNotEmpty=…/inbox`) + a 1-min sweep timer (short because it
+  also retries jobs queued while the NAS was down); and
   `summarize-control.service` + `.path` (`…/control`). Mirrors the `whisper-worker`
   / `whisper-control` trio. `TimeoutStartSec=12h` because a job blocks on the GPU
   flock while a transcription runs and may itself be a multi-pass condense.
@@ -336,12 +399,12 @@ like transcripts.
   flash-attn) roughly halve that to ~1.3 GB. 16k is now the **per-pass / per-chunk**
   ceiling, not the whole-transcript ceiling — longer inputs are chunked, not
   truncated. Raising ctx to 24k+ risks OOM on this card.
-- **NAS delivery**: each saved `<stem>.summary*.md` and `<stem>.notes.md` is
-  best-effort copied to the NAS `<stem>/` folder (temp+rename), same target as the
-  whisper worker; NAS offline just logs. Because the worker is **root** now, the
-  old `DynamicUser` write-hole plumbing is gone — root bypasses the CIFS masks, so
-  the loosened `dir_mode=0777`/`file_mode=0666` in `configuration.nix` is no
-  longer needed *for summaries* (still used by whisper delivery; leave it).
+- **No delivery step**: `<stem>.summary*.md` and `<stem>.notes.md` are written
+  straight into the NAS `<stem>/` folder. The old best-effort copy-to-NAS path
+  (`deliver_nas`) is **gone**, along with `SUMMARIZE_NAS_ROOT`. The worker runs as
+  **root**, which bypasses the CIFS masks, so `dir_mode=0777`/`file_mode=0666` in
+  `configuration.nix` is not needed for the workers — but nginx reads the archive
+  as user `nginx`, so leave those masks open.
 - The worker sends `think:false` (Qwen3 is a thinking model) and strips any stray
   `<think>…</think>` defensively.
 - **Model provisioning**: `services.ollama.loadModels = [ "qwen3:14b" ]` pulls the
@@ -362,6 +425,19 @@ like transcripts.
   `whisperprompts`) and numbered `#N view/.md` summary chips are unchanged. The
   token estimate is now **informational** ("longer than one pass; will be
   condensed in chunks"), not a truncation blocker.
+- **Two-level archive listing** (`listStems()` in `index.html`): the archive is
+  one folder per transcript, so `/status/transcripts/` yields *directories* and
+  each stem's files come from `/status/transcripts/<stem>/` (nginx `autoindex`
+  serves any depth under an `alias` — the same property `/status/work/<jobdir>/`
+  already relied on). Refetching every folder each 4s poll would be absurd, so
+  folder listings are **cached and refreshed only when the parent listing shows
+  the directory's mtime moved** (CIFS does bump a dir's mtime on file create —
+  measured), plus a 60s ceiling to catch in-place edits, which do *not* move it.
+  File **content** is always fetched `cache:'no-store'` and never comes from this
+  cache. Folder names starting with `_` are the reserved drop dirs, not stems.
+  Every artifact URL is `/transcripts/<stem>/<file>` via the `fileUrl()` helper —
+  **both** segments need `encodeURIComponent` (stems are user filenames and
+  routinely contain spaces and brackets).
 - **Poll must not clobber the archive** (`render()`): the 4s poll re-renders, and
   a naive `#archive.innerHTML = …` replaces every node — which resets the scroll
   offset of open transcript/summary `<pre>` previews and drops focus/caret in the

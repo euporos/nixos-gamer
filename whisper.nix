@@ -5,15 +5,35 @@
 #   web UI:      http://192.168.85.30:8990/  (upload, live job status, cancel,
 #                requeue, transcript browser — static page, no backend daemon)
 #   upload:      curl -T aufnahme.m4a http://192.168.85.30:8990/
-#                (or: scp aufnahme.m4a phylax@192.168.85.30:/srv/whisper/inbox/)
-#   transcripts: /srv/whisper/transcripts/  (also http://192.168.85.30:8990/transcripts/)
-#                and delivered (one folder per transcript) to the NAS at
-#                /media/NAS/Netspace/artifacts/transcriptions/<stem>/
+#                (or: scp aufnahme.m4a phylax@192.168.85.30:/srv/whisper/inbox/,
+#                 or: copy it into the NAS drop dir .../transcriptions/_inbox/)
+#   archive:     THE NAS IS THE SOURCE OF TRUTH. Everything durable lives in
+#                /media/NAS/Netspace/artifacts/transcriptions/<stem>/ — the
+#                source audio, every transcript format, and the summaries
+#                summarize.nix writes alongside. Served read-only for the UI at
+#                http://192.168.85.30:8990/transcripts/<stem>/. Nothing durable
+#                is kept on the SSD: /srv/whisper is scratch (upload staging,
+#                the podman job dir, UI sentinels) and can be wiped at will.
+#
+# Why NAS-as-truth rather than the old "local truth + delivery copy": with two
+# copies, a transcript corrected by hand on the share was invisible to the
+# summarizer, which re-read the untouched local original. One copy, one truth.
+#
+# The share is an automounted CIFS mount that can be offline (headless box, WoL)
+# — so the worker probes it and no-ops when it is down, and queued audio just
+# waits for the next sweep. Nothing is lost; jobs are only delayed.
+#
+# TWO DROP POINTS, TWO TRIGGER MECHANISMS: the local inbox is watched by a
+# systemd .path unit (instant). The NAS one CANNOT be — inotify does not see
+# changes another host makes over CIFS (measured on this box: inotifywait saw
+# nothing when a second machine created files on the share), so .path units are
+# blind to it. It is polled by the sweep timer instead, hence the 30s period.
 #
 # The UI has no state of its own: it polls nginx autoindex-JSON listings of
-# inbox/work/failed/transcripts (so jobs started via curl/scp show up too) and
-# requests cancel/requeue by PUTting "<name>.cancel"/"<name>.requeue" sentinel
-# files into /srv/whisper/control, which the whisper-control path unit acts on.
+# inbox/nas-inbox/work/failed/transcripts (so jobs started via curl/scp/NAS-copy
+# show up too) and requests cancel/requeue by PUTting "<name>.cancel"/
+# "<name>.requeue" sentinel files into /srv/whisper/control, which the
+# whisper-control path unit acts on.
 #
 # nginx PUTs uploads atomically into /srv/whisper/inbox; a systemd path unit
 # fires the worker, which runs WhisperX (faster-whisper large-v3, German
@@ -38,6 +58,13 @@ let
   # die with "no kernel image is available" on the 1080 Ti. Newest archived
   # tag with a Pascal-capable torch:
   image = "ghcr.io/jim60105/whisperx:large-v3-de-67924da";
+
+  # THE archive root — source of truth, not a delivery copy. One folder per
+  # transcript (<stem>/), plus two reserved underscore-prefixed dirs: _inbox/
+  # (audio drop) and _failed/. On the automounted CIFS share, so every consumer
+  # has to tolerate it being briefly absent. summarize.nix points at the same
+  # path; keep the two in sync.
+  nasRoot = "/media/NAS/Netspace/artifacts/transcriptions";
 
   # Merge two per-channel WhisperX JSONs (left/right) into one speaker-labelled
   # transcript in every output format, interleaving segments by start time.
@@ -116,15 +143,24 @@ let
     runtimeInputs = [ pkgs.podman pkgs.jq pkgs.coreutils pkgs.curl pkgs.ffmpeg pkgs.python3 pkgs.util-linux ];
     text = ''
       IMAGE=${lib.escapeShellArg image}
+      # The NAS is the SOURCE OF TRUTH (not a delivery copy any more): every
+      # durable artifact — the source audio, all transcript formats and the
+      # summaries — lives in one folder per transcript under $NASROOT/<stem>/.
+      # Nothing durable is kept on the SSD, so a transcript hand-edited on the
+      # share is the file the summarizer later reads.
+      NASROOT=${nasRoot}
+      # Second audio drop point, on the share itself: copy a file in from any
+      # machine and it gets transcribed. It is POLLED (the sweep timer), not
+      # watched — inotify does not see remote changes on CIFS, so a systemd
+      # .path unit is blind to files another host creates. Verified on this box.
+      NASINBOX=$NASROOT/_inbox
+      NASFAIL=$NASROOT/_failed
+      # Local dirs are pure scratch now. $INBOX only stages HTTP/scp uploads
+      # (atomic + fast, and it keeps working while the NAS is down); $WORK holds
+      # the per-job container dir, which must stay on ext4 — bind-mounting a
+      # CIFS path into podman and running WhisperX against it would be dire.
       INBOX=/srv/whisper/inbox
       WORK=/srv/whisper/work
-      OUT=/srv/whisper/transcripts
-      DONE=/srv/whisper/processed
-      FAIL=/srv/whisper/failed
-      # NAS delivery target: one folder per transcript. Automounted CIFS share
-      # (configuration.nix), so it may be offline — delivery is best-effort and
-      # never fails a job; $OUT stays the local source of truth for the web UI.
-      NAS=/media/NAS/Netspace/artifacts/transcriptions
       # HF token (HF_TOKEN=hf_... line), decrypted from the repo by sops-nix
       # to /run/secrets/hf-token at activation (see sops.nix). Sourced below.
       TOKEN_FILE=${config.sops.secrets."hf-token".path}
@@ -140,7 +176,25 @@ let
         HF_TOKEN=''${HF_TOKEN#HF_TOKEN=}
       fi
 
-      # A file may still be mid-upload (scp writes in place). Wait until its
+      # The NAS holds every durable output, so there is nothing useful to do
+      # while it is unreachable — bail out and let the 30s sweep timer retry.
+      # Queued audio simply waits in whichever inbox it sits in; nothing is lost.
+      # Probe by actually writing: /media/NAS/Netspace is an autofs trigger, so
+      # `mountpoint` can report success on the trigger itself while the CIFS
+      # mount underneath failed. A create is the only honest test.
+      nas_ready() {
+        mkdir -p "$NASROOT" "$NASINBOX" "$NASFAIL" 2>/dev/null || return 1
+        touch "$NASROOT/.writable" 2>/dev/null || return 1
+        rm -f "$NASROOT/.writable"
+      }
+
+      if ! nas_ready; then
+        echo "NAS unreachable at $NASROOT — nothing to do; retrying on the next sweep"
+        exit 0
+      fi
+
+      # A file may still be mid-upload (scp writes in place, and a copy onto the
+      # NAS inbox from another machine lands byte by byte). Wait until its
       # size has been stable for 5s; give up after ~1h.
       wait_until_stable() {
         local f=$1 prev=-1 size tries=0
@@ -189,7 +243,9 @@ let
       fi
 
       shopt -s nullglob
-      for audio in "$INBOX"/*; do
+      # Drain both drop points: the local staging inbox (HTTP PUT / scp) and the
+      # NAS one (files copied in from any machine). Same handling either way.
+      for audio in "$INBOX"/* "$NASINBOX"/*; do
         [ -f "$audio" ] || continue
         name=$(basename "$audio")
         echo "picking up: $name"
@@ -279,24 +335,29 @@ let
         fi
 
         if [ "$ok" = 1 ]; then
-          mv "$job/$input" "$DONE/$name"
           rm -f "$job"/L.wav "$job"/R.wav "$job"/L.json "$job"/R.json
-          # $job now holds exactly this transcript's output files. Deliver a
-          # copy to the NAS, one folder per transcript (best-effort: the share
-          # is an automounted CIFS mount that may be offline — never fail the
-          # job over it, the local $OUT copy is kept and can be re-synced).
-          dest=$NAS/$outstem
-          if mkdir -p "$dest" 2>/dev/null && cp -f "$job"/* "$dest"/ 2>/dev/null; then
-            echo "delivered: $name -> $dest/"
+          # $job now holds the source audio plus exactly this transcript's
+          # outputs. Move the lot into the NAS folder for this stem — that
+          # folder IS the archive: source audio (under its original name, so
+          # any .2ch/.lang-XX marker stays visible) next to every text format,
+          # and later the summaries the summarize worker writes alongside.
+          # A failure here fails the job on purpose: without the NAS there is
+          # nowhere to put the result, and the audio must go back in a queue.
+          dest=$NASROOT/$outstem
+          if mkdir -p "$dest" 2>/dev/null \
+             && mv -f "$job/$input" "$dest/$name" 2>/dev/null \
+             && find "$job" -mindepth 1 -maxdepth 1 -exec mv -f -t "$dest" {} +; then
+            rmdir "$job" 2>/dev/null || true
+            echo "done: $name -> $dest/"
           else
-            echo "WARN: NAS delivery to $dest failed (share offline?) — local copy kept in $OUT"
+            echo "FAILED: $name — NAS write to $dest failed (share offline?); requeueing audio"
+            mv -f "$job/$input" "$INBOX/$name" 2>/dev/null || true
+            rm -rf "$job"
           fi
-          find "$job" -mindepth 1 -maxdepth 1 -exec mv -t "$OUT" {} +
-          rmdir "$job"
-          echo "done: $name -> $OUT/$outstem.*"
         else
-          echo "FAILED: $name — moving audio to $FAIL"
-          mv "$job/$input" "$FAIL/$name" || true
+          echo "FAILED: $name — moving audio to $NASFAIL"
+          mv -f "$job/$input" "$NASFAIL/$name" 2>/dev/null \
+            || mv -f "$job/$input" "$INBOX/$name" 2>/dev/null || true
           rm -rf "$job"
         fi
       done
@@ -313,8 +374,13 @@ let
     name = "whisper-control";
     runtimeInputs = [ pkgs.podman pkgs.coreutils ];
     text = ''
+      # Queued audio can sit in either drop point (local HTTP/scp staging or the
+      # NAS one); failed/cancelled audio always parks on the NAS, beside nothing
+      # in particular, so a requeue is reachable from any machine.
       INBOX=/srv/whisper/inbox
-      FAILED=/srv/whisper/failed
+      NASROOT=${nasRoot}
+      NASINBOX=$NASROOT/_inbox
+      FAILED=$NASROOT/_failed
       CONTROL=/srv/whisper/control
 
       current_job() {
@@ -329,8 +395,9 @@ let
         echo "cancel requested: $name"
         # If the worker snatches the file between test and mv, fall through
         # to the container poll instead of failing.
-        if [ -f "$INBOX/$name" ] && mv "$INBOX/$name" "$FAILED/$name" 2>/dev/null; then
-          echo "cancel: $name was still queued -> moved to failed/"
+        if { [ -f "$INBOX/$name" ] && mv "$INBOX/$name" "$FAILED/$name" 2>/dev/null; } \
+           || { [ -f "$NASINBOX/$name" ] && mv "$NASINBOX/$name" "$FAILED/$name" 2>/dev/null; }; then
+          echo "cancel: $name was still queued -> moved to _failed/"
           continue
         fi
         # The worker may be between picking the file up and starting the
@@ -348,10 +415,88 @@ let
       for s in "$CONTROL"/*.requeue; do
         name=$(basename "''${s%.requeue}")
         rm -f "$s"
-        if [ -f "$FAILED/$name" ] && mv "$FAILED/$name" "$INBOX/$name" 2>/dev/null; then
-          echo "requeue: $name -> inbox"
+        # Back into the NAS inbox, where the failed audio already lives — a
+        # rename on the share, no copy back and forth over the wire.
+        if [ -f "$FAILED/$name" ] && mv "$FAILED/$name" "$NASINBOX/$name" 2>/dev/null; then
+          echo "requeue: $name -> _inbox"
         fi
       done
+    '';
+  };
+
+  # One-time move of the pre-NAS-as-truth layout onto the share: the old flat
+  # /srv/whisper/transcripts/<stem>.<ext>, the processed audio, and anything
+  # parked in the old local failed/ dir. Deliberately NON-DESTRUCTIVE and
+  # idempotent — it only copies files the NAS does not already have (most
+  # transcripts were delivered there already) and never deletes or overwrites,
+  # so it is safe to re-run and safe to interrupt. The old local dirs are left
+  # alone for the operator to inspect and remove by hand once satisfied; see the
+  # "cleanup after migration" note in CLAUDE.md.
+  migrate = pkgs.writeShellApplication {
+    name = "whisper-nas-migrate";
+    runtimeInputs = [ pkgs.coreutils ];
+    text = ''
+      NASROOT=${nasRoot}
+      OLDOUT=/srv/whisper/transcripts
+      OLDDONE=/srv/whisper/processed
+      OLDFAIL=/srv/whisper/failed
+
+      # Create the two reserved dirs unconditionally, before any early exit: the
+      # UI lists them over HTTP and would otherwise report the NAS unreachable
+      # until the first worker sweep created them.
+      if ! { mkdir -p "$NASROOT/_inbox" "$NASROOT/_failed" 2>/dev/null \
+             && touch "$NASROOT/.writable" 2>/dev/null; }; then
+        echo "NAS unreachable — skipping migration, will retry on the next start"
+        exit 0
+      fi
+      rm -f "$NASROOT/.writable"
+
+      [ -d "$OLDOUT" ] || [ -d "$OLDDONE" ] || [ -d "$OLDFAIL" ] || exit 0
+
+      copied=0; skipped=0
+
+      # Derive <stem> the same way the UI's archive grouping did: strip the
+      # longest known transcript/summary/notes suffix. Everything else (i.e. the
+      # processed audio) keeps its full name and is filed under its basename.
+      stem_of() {
+        local n=$1
+        case "$n" in
+          *.speakers.txt) echo "''${n%.speakers.txt}" ;;
+          *.notes.md)     echo "''${n%.notes.md}" ;;
+          *.summary.md)   echo "''${n%.summary.md}" ;;
+          *.summary.*.md) n=''${n%.md}; echo "''${n%.summary.*}" ;;
+          *.txt|*.srt|*.vtt|*.tsv|*.json) echo "''${n%.*}" ;;
+          *) echo "''${n%.*}" ;;
+        esac
+      }
+
+      shopt -s nullglob
+      for src in "$OLDOUT"/* "$OLDDONE"/*; do
+        [ -f "$src" ] || continue
+        name=$(basename "$src")
+        stem=$(stem_of "$name")
+        dest=$NASROOT/$stem/$name
+        if [ -e "$dest" ]; then skipped=$((skipped + 1)); continue; fi
+        if mkdir -p "$NASROOT/$stem" 2>/dev/null && cp -p "$src" "$dest.part" 2>/dev/null \
+           && mv -n "$dest.part" "$dest" 2>/dev/null; then
+          copied=$((copied + 1))
+        else
+          rm -f "$dest.part" 2>/dev/null || true
+          echo "WARN: could not migrate $name"
+        fi
+      done
+
+      # Old local failures move into the NAS _failed/ queue so the UI's requeue
+      # button keeps working for them.
+      for src in "$OLDFAIL"/*; do
+        [ -f "$src" ] || continue
+        name=$(basename "$src")
+        if [ -e "$NASROOT/_failed/$name" ]; then skipped=$((skipped + 1)); continue; fi
+        cp -p "$src" "$NASROOT/_failed/$name" && copied=$((copied + 1)) || true
+      done
+
+      echo "migration: $copied file(s) copied to $NASROOT, $skipped already present"
+      echo "the old local dirs are untouched — remove them by hand once you have checked the NAS"
     '';
   };
 
@@ -386,12 +531,13 @@ in
   };
 
   systemd.tmpfiles.rules = [
+    # Local dirs are scratch only: inbox stages HTTP/scp uploads, work holds the
+    # ext4 job dir podman bind-mounts, control carries UI sentinels. Every
+    # durable artifact lives on the NAS (see the worker) — there is deliberately
+    # no local transcripts/, processed/ or failed/ any more.
     "d /srv/whisper 0755 whisper whisper -"
     "d /srv/whisper/inbox 2770 whisper whisper -"
     "d /srv/whisper/work 0770 whisper whisper -"
-    "d /srv/whisper/transcripts 2775 whisper whisper -"
-    "d /srv/whisper/processed 2770 whisper whisper -"
-    "d /srv/whisper/failed 2770 whisper whisper -"
     "d /srv/whisper/control 2770 whisper whisper -"
     "d /var/cache/whisperx 0770 whisper whisper -"
     "d /var/lib/whisper 0750 root whisper -"
@@ -466,14 +612,24 @@ in
       # JSON listings the UI polls to derive job state — covers jobs started
       # from the CLI too, since they are just files in these directories.
       locations."/status/inbox/" = statusListing "/srv/whisper/inbox/";
+      # The second (NAS) drop point — audio copied onto the share from any
+      # machine. The UI merges it with the local staging inbox above.
+      locations."/status/nas-inbox/" = statusListing "${nasRoot}/_inbox/";
       locations."/status/work/" = statusListing "/srv/whisper/work/";
-      locations."/status/failed/" = statusListing "/srv/whisper/failed/";
-      locations."/status/transcripts/" = statusListing "/srv/whisper/transcripts/";
+      locations."/status/failed/" = statusListing "${nasRoot}/_failed/";
+      # The archive root. One directory per transcript, so this listing yields
+      # DIRECTORIES; the UI lists a stem's files by requesting the subpath
+      # /status/transcripts/<stem>/ — autoindex serves any depth under an alias
+      # (exactly how /status/work/<jobdir>/ already works).
+      locations."/status/transcripts/" = statusListing "${nasRoot}/";
       locations."/status/summaries/inbox/" = statusListing "/srv/whisper/summaries/inbox/";
       locations."/status/summaries/work/" = statusListing "/srv/whisper/summaries/work/";
       locations."/status/summaries/failed/" = statusListing "/srv/whisper/summaries/failed/";
+      # Downloads/previews: /transcripts/<stem>/<file>. nginx only ever READS the
+      # share — uploads still land in the local staging inbox — so this needs no
+      # relaxation of the unit's ProtectSystem=strict (verified: reads are fine).
       locations."/transcripts/" = {
-        alias = "/srv/whisper/transcripts/";
+        alias = "${nasRoot}/";
         extraConfig = ''
           autoindex on;
           charset utf-8;
@@ -510,6 +666,21 @@ in
     pathConfig.DirectoryNotEmpty = "/srv/whisper/inbox";
   };
 
+  # Runs on every switch and boot, but is a no-op the moment the old local dirs
+  # are gone (or already mirrored) — see the script. Ordered before the worker so
+  # a sweep can't interleave with the migration of the same stem.
+  systemd.services.whisper-nas-migrate = {
+    description = "Migrate the pre-NAS local transcripts/processed dirs onto the share";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "whisper-worker.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = lib.getExe migrate;
+      TimeoutStartSec = "2h";
+    };
+  };
+
   systemd.services.whisper-control = {
     description = "Apply cancel/requeue sentinels from /srv/whisper/control";
     serviceConfig = {
@@ -526,14 +697,18 @@ in
     pathConfig.DirectoryNotEmpty = "/srv/whisper/control";
   };
 
-  # Sweeper for anything the path unit misses (files landing mid-run,
-  # uploads interrupted by a reboot).
+  # This timer is no longer just a safety net for what the path unit misses
+  # (files landing mid-run, uploads interrupted by a reboot) — it is the ONLY
+  # trigger for the NAS drop dir, which inotify cannot watch (see the header).
+  # Hence 30s rather than 10min: that is the pickup latency for a file copied
+  # onto the share. A run over two empty inboxes is a few stat()s, and systemd
+  # will not start a second instance while a transcription is still running.
   systemd.timers.whisper-worker = {
-    description = "Periodic whisper inbox sweep";
+    description = "Whisper inbox sweep (and the sole trigger for the NAS drop dir)";
     wantedBy = [ "timers.target" ];
     timerConfig = {
       OnBootSec = "3min";
-      OnUnitActiveSec = "10min";
+      OnUnitActiveSec = "30s";
     };
   };
 }

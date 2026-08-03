@@ -9,7 +9,16 @@
 #            body = {"stem":"meeting","prompt":"list action items", ...}
 #   poll:    /status/summaries/{inbox,work,failed}/  (autoindex JSON)
 #   cancel:  PUT http://192.168.85.30:8990/summaries/control/<jobid>.cancel
-#   result:  /srv/whisper/transcripts/<stem>.summary[.N].md   (served + on the NAS)
+#   result:  <NAS>/artifacts/transcriptions/<stem>/<stem>.summary[.N].md
+#
+# THE NAS IS THE SOURCE OF TRUTH (see whisper.nix). This worker reads the
+# transcript straight out of the archive folder on the share and writes the
+# summary back into the same folder — so correcting a transcript by hand on the
+# NAS changes what the next summary is built from. It used to summarize a local
+# copy and merely deliver the result to the NAS, which made those hand-edits
+# invisible. Only the job specs (below) are still local scratch. The share is
+# automounted and may be offline: the worker then leaves the queue untouched and
+# retries on the next sweep, rather than failing jobs.
 #
 # Backed by a local Ollama running Qwen3 14B (GGUF, Q4) on the GTX 1080 Ti.
 # Unlike the WhisperX (PyTorch) stack this does NOT hit the Pascal wall: Ollama
@@ -19,12 +28,14 @@
 #
 # JOB SPEC (JSON; the prompt is free text, so it can't live in a filename):
 #   {
-#     "stem":        "<transcript stem>",   # required; worker reads
-#                                            #   <stem>.speakers.txt (preferred)
-#                                            #   else <stem>.txt from transcripts/,
-#                                            #   with the same path safety as the
-#                                            #   old "file" (a bare name that must
-#                                            #   canonicalize to a direct child).
+#     "stem":        "<transcript stem>",   # required; names the archive folder
+#                                            #   <ROOT>/<stem>/, from which the
+#                                            #   worker reads <stem>.speakers.txt
+#                                            #   (preferred) else <stem>.txt. Must
+#                                            #   be a bare name canonicalizing to a
+#                                            #   direct child of ROOT — it comes
+#                                            #   from a job spec, so it must not be
+#                                            #   able to escape the archive.
 #     "prompt":      "<extra instructions>", # optional: purpose prompt, applied
 #                                            #   only in the FINAL render pass.
 #     "language":    "German|English|...",   # optional: force the summary language.
@@ -73,11 +84,15 @@ let
 
     OLLAMA      = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
     MODEL       = os.environ.get("SUMMARIZE_MODEL", "qwen3:14b")
-    ROOT        = os.path.realpath(os.environ.get("TRANSCRIPT_ROOT", "/srv/whisper/transcripts"))
-    # Best-effort NAS delivery target (one folder per transcript), mirroring the
-    # whisper worker. Automounted CIFS (may be offline) — every copy is wrapped
-    # in try/except and never affects the job. Empty = off.
-    NAS_ROOT    = os.environ.get("SUMMARIZE_NAS_ROOT", "")
+    # The archive root on the NAS: one folder per transcript, holding the source
+    # audio, every transcript format, and the summaries this worker writes. It is
+    # the SOURCE OF TRUTH, not a delivery copy — we read the very file a human
+    # may have corrected on the share, and write results back beside it. (The old
+    # arrangement summarized a local original and merely copied the result over,
+    # so hand-edits on the NAS were silently ignored.) Automounted CIFS, so it
+    # can be briefly absent: see nas_ready().
+    ROOT        = os.path.realpath(os.environ.get("TRANSCRIPT_ROOT",
+                                                 "/media/NAS/Netspace/artifacts/transcriptions"))
     NUM_CTX     = int(os.environ.get("SUMMARIZE_NUM_CTX", "16384"))
     TEMPERATURE = float(os.environ.get("SUMMARIZE_TEMPERATURE", "0.3"))
     # Target length of the FINAL summary, in words. Enforced with a strict +-10%
@@ -195,35 +210,40 @@ let
 
     # ---- transcript source / output paths (all confined to ROOT) -------------
 
-    def resolve_source(stem):
-        # <stem> must be a bare name resolving to a direct child of ROOT.
+    def stem_dir(stem):
+        # Every artifact for a transcript lives in ROOT/<stem>/. <stem> must be a
+        # bare name resolving to a direct child of ROOT — it arrives from a job
+        # spec, so "../.." must not be able to escape the archive.
         if os.path.basename(stem) != stem or stem in ("", ".", ".."):
             raise ValueError("invalid stem")
+        d = os.path.realpath(os.path.join(ROOT, stem))
+        if os.path.dirname(d) != ROOT:
+            raise ValueError("stem path is outside the transcript archive")
+        if not os.path.isdir(d):
+            raise ValueError("no transcript folder for stem " + stem)
+        return d
+
+    def resolve_source(stem):
+        # Read the file as it is on the share right now — including any manual
+        # correction — rather than a local copy taken at transcription time.
+        d = stem_dir(stem)
         for ext in (".speakers.txt", ".txt"):
-            cand = os.path.realpath(os.path.join(ROOT, stem + ext))
-            if os.path.dirname(cand) != ROOT:
-                raise ValueError("source path is outside the transcript directory")
+            cand = os.path.join(d, stem + ext)
             if os.path.isfile(cand):
                 return cand
         raise ValueError("no transcript (.speakers.txt/.txt) for stem " + stem)
 
     def notes_path(stem):
-        p = os.path.realpath(os.path.join(ROOT, stem + ".notes.md"))
-        if os.path.dirname(p) != ROOT:
-            raise ValueError("notes path is outside the transcript directory")
-        return p
+        return os.path.join(stem_dir(stem), stem + ".notes.md")
 
     def save_summary(stem, text):
         # Persist next to the transcript as <stem>.summary[.N].md — race-free
         # O_EXCL numbering: first is <stem>.summary.md, then .2/.3/... So each
         # summarize click appends a new numbered summary rather than overwriting.
-        if os.path.basename(stem) != stem or stem in ("", ".", ".."):
-            raise ValueError("invalid stem for save")
+        d = stem_dir(stem)
         for n in range(1, 1000):
             name = stem + ".summary.md" if n == 1 else "%s.summary.%d.md" % (stem, n)
-            path = os.path.join(ROOT, name)
-            if os.path.dirname(os.path.realpath(path)) != ROOT:
-                raise ValueError("summary path is outside the transcript directory")
+            path = os.path.join(d, name)
             try:
                 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o664)
             except FileExistsError:
@@ -250,23 +270,20 @@ let
         os.replace(tmp, p)
         return os.path.basename(p)
 
-    def deliver_nas(stem, name, text):
-        # Copy a just-written file to the NAS <stem>/ folder, like the whisper
-        # worker. Best-effort: the share is an automounted CIFS mount that may be
-        # offline — swallow every error, the local copy is the source of truth.
-        # Temp + atomic rename so a poller never sees a partial file.
-        if not NAS_ROOT:
-            return
+    def nas_ready():
+        # ROOT is on an automounted CIFS share that can be offline (headless box,
+        # WoL). There is no local fallback by design, so when it is down we do
+        # nothing and leave the specs queued for the next sweep. Probe by
+        # writing: the parent is an autofs trigger, which can look mounted even
+        # when the CIFS mount underneath failed, so only a create is conclusive.
+        probe = os.path.join(ROOT, ".writable")
         try:
-            dest = os.path.join(NAS_ROOT, stem)
-            os.makedirs(dest, exist_ok=True)
-            tmp = os.path.join(dest, name + ".tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(text)
-            os.replace(tmp, os.path.join(dest, name))
-            log("delivered %s -> %s/" % (name, dest))
-        except Exception as e:  # noqa: BLE001 — best-effort; local copy is kept
-            log("NAS delivery of %s failed: %r" % (name, e))
+            with open(probe, "w") as f:
+                f.write("")
+            os.unlink(probe)
+            return True
+        except OSError:
+            return False
 
     # ---- Ollama --------------------------------------------------------------
 
@@ -452,7 +469,17 @@ let
         tok = est_tokens(text)
         long_job = tok > single_pass_limit
         npath = notes_path(stem)
+        # The notes cache lets a repeat job for a long stem skip the whole
+        # chunked condense — but it is derived from the transcript, and the
+        # transcript now lives on the share where it can be corrected by hand.
+        # A cache older than its source would silently summarize the text as it
+        # was BEFORE the edit, which is exactly the staleness NAS-as-truth was
+        # meant to end. Treat an out-of-date cache as absent and re-condense.
         have_notes = os.path.isfile(npath)
+        if have_notes and os.path.getmtime(npath) < os.path.getmtime(src):
+            log("%s: notes cache for %s is older than the transcript "
+                "(edited?) — re-condensing" % (jobid, stem))
+            have_notes = False
         notes_to_write = None
 
         cancel_check()
@@ -500,14 +527,12 @@ let
         # repeat job for this long stem can take the fast path.
         if notes_to_write is not None:
             try:
-                nname = write_notes(stem, notes_to_write)
-                deliver_nas(stem, nname, notes_to_write)
+                write_notes(stem, notes_to_write)
             except Exception as e:  # noqa: BLE001 — cache is an optimization, not critical
                 log("%s: notes cache write failed: %r" % (jobid, e))
 
         name = save_summary(stem, summary)
-        deliver_nas(stem, name, summary)
-        log("%s: wrote %s" % (jobid, name))
+        log("%s: wrote %s" % (jobid, os.path.join(stem, name)))
 
     # ---- cancel signalling ---------------------------------------------------
     # A cancel is a <jobid>.cancel sentinel. summarize-control hands a running
@@ -592,6 +617,12 @@ let
             clear_progress(jobid)
 
     def main():
+        # No NAS, no transcripts to read and nowhere to put a summary. Leave
+        # every spec queued in inbox/ and let the sweep timer come back — a job
+        # submitted while the share is down is delayed, never dropped or failed.
+        if not nas_ready():
+            log("NAS unreachable at %s — leaving the queue untouched" % ROOT)
+            return
         for p in sorted(glob.glob(os.path.join(INBOX, "*.json"))):
             process(p)
 
@@ -714,7 +745,9 @@ in
     environment = {
       OLLAMA_URL = "http://127.0.0.1:11434";
       SUMMARIZE_MODEL = "qwen3:14b";
-      TRANSCRIPT_ROOT = "/srv/whisper/transcripts";
+      # The NAS archive itself — read the transcript from ROOT/<stem>/ and write
+      # the summary back into the same folder. Must match whisper.nix's nasRoot.
+      TRANSCRIPT_ROOT = "/media/NAS/Netspace/artifacts/transcriptions";
       SUMMARIZE_JOB_ROOT = "/srv/whisper/summaries";
       # ~80 min of speech per single-pass / per chunk; fits VRAM thanks to
       # flash-attn + q8_0 KV (see services.ollama.environmentVariables).
@@ -724,9 +757,6 @@ in
       # render pass. Per-job overridable via the spec's "target_words".
       SUMMARIZE_TARGET_WORDS = "500";
       GPU_LOCK = "/run/whisper-gpu.lock";
-      # Best-effort NAS delivery of saved summaries + notes, one folder per
-      # transcript — the same target the whisper worker uses.
-      SUMMARIZE_NAS_ROOT = "/media/NAS/Netspace/artifacts/transcriptions";
     };
     serviceConfig = {
       Type = "oneshot";
@@ -744,13 +774,16 @@ in
     pathConfig.DirectoryNotEmpty = "/srv/whisper/summaries/inbox";
   };
 
-  # Sweeper for specs the path unit misses (landing mid-run, or a reboot).
+  # Sweeper for specs the path unit misses (landing mid-run, or a reboot) — and
+  # the retry loop for jobs queued while the NAS was unreachable, which is why
+  # it is a minute rather than ten. An idle run is a python start that probes the
+  # share and exits; systemd will not overlap it with a running job.
   systemd.timers.summarize-worker = {
-    description = "Periodic summary inbox sweep";
+    description = "Summary inbox sweep (also retries jobs queued while the NAS was down)";
     wantedBy = [ "timers.target" ];
     timerConfig = {
       OnBootSec = "4min";
-      OnUnitActiveSec = "10min";
+      OnUnitActiveSec = "1min";
     };
   };
 

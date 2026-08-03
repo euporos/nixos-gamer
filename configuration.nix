@@ -70,9 +70,14 @@
   # username=/password= credentials). The credentials file is decrypted from
   # the repo by sops-nix (see sops.nix) to /run/secrets/smb-secrets at
   # activation — no longer hand-placed at /etc/nixos/secrets/smb-secrets. This
-  # is the delivery target for finished transcripts: whisper.nix writes one
-  # folder per transcript under artifacts/transcriptions/, and the summarizer
-  # (summarize.nix) writes <stem>.summary*.md into the same folders.
+  # This share is the SOURCE OF TRUTH for the transcription pipeline, not a
+  # delivery target any more: artifacts/transcriptions/<stem>/ holds the source
+  # audio, every transcript format (whisper.nix) and the summaries
+  # (summarize.nix), and _inbox/ there is a drop point for new audio. Nothing
+  # durable is kept on the SSD. Consequence for THIS mount: it is now on the
+  # critical path at job time — but still not at boot time, so the resilience
+  # options below stay exactly as they were. Both workers probe the share and
+  # no-op while it is down, so an outage delays jobs instead of failing them.
   #
   # Deviation from nas-nixos, on purpose: nofail + x-systemd.automount. This box
   # is headless and off most of the time (WoL), so a NAS that is unreachable at
@@ -81,10 +86,11 @@
   # writes a result), never eagerly at boot; nofail keeps a mount failure
   # non-fatal. cifs-utils provides the mount.cifs helper systemd needs.
   #
-  # dir_mode=0777/file_mode=0666: permit any local user to write, not just the
-  # mount-owner uid=1000. The whisper worker runs as root (root bypasses these
-  # anyway), but the summarizer is a DynamicUser (summarize.nix) that must also
-  # write its summary deliverables here. Everything on this SMB share is
+  # dir_mode=0777/file_mode=0666: permit any local user to read and write, not
+  # just the mount-owner uid=1000. Both workers run as root and bypass these
+  # masks anyway (the DynamicUser summarizer that originally forced this open is
+  # long gone), but nginx serves the archive listings and downloads as user
+  # `nginx` and needs the read side. Everything on this SMB share is
   # authenticated as the single credentials account regardless of local user, so
   # these client-side masks are the only gate — open them to the whole box.
   fileSystems."/media/NAS/Netspace" = {

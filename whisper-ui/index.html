@@ -61,6 +61,13 @@
     font-size:11px;letter-spacing:.15em;padding:1px 8px;margin-left:auto;align-self:center;
   }
   body.offline .offline{display:inline-block}
+  /* The archive lives on the NAS and there is no local fallback, so a share
+     outage is its own state: the box answers, but nothing can be read or run. */
+  .nasoff{
+    display:none;color:var(--red);border:1px solid var(--red);
+    font-size:11px;letter-spacing:.15em;padding:1px 8px;margin-left:auto;align-self:center;
+  }
+  body.nas-offline .nasoff{display:inline-block}
 
   /* ---------- dropzone ---------- */
   #dropzone{
@@ -278,6 +285,7 @@
     <div class="rec" id="rec"></div>
     <h1>Whisper<span class="host">@nixos-gamer</span></h1>
     <span class="offline">offline</span>
+    <span class="nasoff" title="the NAS share holding every transcript is unreachable — uploads still queue, jobs resume automatically once it is back">nas unreachable</span>
   </div>
   <div class="tagline">german speech → text · whisperx large-v3 · int8 on GTX 1080 Ti · ~15× realtime</div>
 </header>
@@ -316,7 +324,11 @@
 
 <footer>
   cli upload works too: <code id="curlhint"></code><br>
-  cancelled &amp; failed audio lands in <code>failed/</code> — requeue re-runs it
+  or copy audio straight onto the NAS: <code>…/artifacts/transcriptions/_inbox/</code>
+  — picked up within ~30s (polled; CIFS can't be watched)<br>
+  everything is archived per transcript in <code>…/artifacts/transcriptions/&lt;stem&gt;/</code>
+  — edit a transcript there and the next summary is built from your edit<br>
+  cancelled &amp; failed audio lands in <code>_failed/</code> — requeue re-runs it
 </footer>
 
 <script>
@@ -354,7 +366,7 @@ const saveMeta = () => localStorage.setItem('whisperui', JSON.stringify(meta));
 const uploads = {};            // name -> {pct, error}
 let server = {inbox:[], working:[], failed:[], transcripts:[],
               sumInbox:new Set(), sumWork:new Set(), sumFailed:new Set(),
-              sumProgress:new Map(), ok:false};
+              sumProgress:new Map(), ok:false, nasOk:true};
 const expanded = new Set();    // stems (transcript preview) + summary filenames, open
 const previews = {};           // stem | summary-filename -> {text} | {error} | {loading}
 // per-transcript summarization extras, survives reloads (own key so pruneMeta,
@@ -407,6 +419,12 @@ const fmtWhen = ms => {
   return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());
 };
 
+// Everything for a transcript lives in its own NAS folder, so every artifact URL
+// is /transcripts/<stem>/<file> — both path segments need escaping (stems are
+// user-supplied filenames and routinely contain spaces and brackets).
+const fileUrl = (stem, name) =>
+  '/transcripts/' + encodeURIComponent(stem) + '/' + encodeURIComponent(name);
+
 async function jfetch(url){
   const r = await fetch(url, {cache:'no-store'});
   if(!r.ok) throw new Error('HTTP ' + r.status);
@@ -432,14 +450,60 @@ const progressMap = arr => {
   return m;
 };
 
+// The archive is one folder per transcript on the NAS, so listing it takes two
+// levels: /status/transcripts/ yields directories, /status/transcripts/<stem>/
+// yields that stem's files. Refetching every folder on every 4s poll would be
+// absurd, so folder listings are cached and only refreshed when the parent
+// listing shows the directory's mtime has moved (CIFS does bump a directory's
+// mtime when a file is created in it — measured). An in-place EDIT of an
+// existing file does not move it, and neither does a listing of unchanged
+// names, so a slow full refresh covers stale sizes; file CONTENT is always
+// fetched with cache:'no-store' and is never served from here.
+const STEM_CACHE_MAX_AGE_MS = 60000;
+const stemCache = new Map();   // stem -> {dirMtime, at, files}
+
+async function listStems(dirs){
+  const out = [];
+  await Promise.all(dirs.map(async d => {
+    const dirMtime = Date.parse(d.mtime);
+    const hit = stemCache.get(d.name);
+    if(hit && hit.dirMtime === dirMtime && Date.now() - hit.at < STEM_CACHE_MAX_AGE_MS){
+      out.push({stem: d.name, dirMtime, files: hit.files});
+      return;
+    }
+    try{
+      const files = await jfetch('/status/transcripts/' + encodeURIComponent(d.name) + '/');
+      stemCache.set(d.name, {dirMtime, at: Date.now(), files});
+      out.push({stem: d.name, dirMtime, files});
+    }catch(e){
+      // folder vanished or briefly unreadable — keep showing the last good
+      // listing rather than making the card blink out of existence
+      if(hit) out.push({stem: d.name, dirMtime: hit.dirMtime, files: hit.files});
+    }
+  }));
+  return out;
+}
+
 async function poll(){
+  // Two independent failure modes, shown differently: the BOX being unreachable
+  // (nothing works) and the NAS share being offline (the box is fine, but the
+  // archive — which is the source of truth — is not readable and no job can
+  // run). Only the local listings decide server.ok; the NAS-backed ones degrade
+  // on their own so a share outage doesn't masquerade as the box being down.
+  let nasOk = true;
+  const nasFetch = async url => { try{ return await jfetch(url); }
+                                  catch(e){ nasOk = false; return []; } };
   try{
-    const [inbox, work, failed, transcripts, sInbox, sWork, sFailed] = await Promise.all([
+    const [inbox, work, sInbox, sWork, sFailed, nasInbox, failed, archive] = await Promise.all([
       jfetch('/status/inbox/'), jfetch('/status/work/'),
-      jfetch('/status/failed/'), jfetch('/status/transcripts/'),
       jfetch('/status/summaries/inbox/'), jfetch('/status/summaries/work/'),
       jfetch('/status/summaries/failed/'),
+      nasFetch('/status/nas-inbox/'), nasFetch('/status/failed/'),
+      nasFetch('/status/transcripts/'),
     ]);
+    // _inbox/ and _failed/ are the reserved drop dirs, not transcripts
+    const transcripts = await listStems(
+      archive.filter(e => e.type === 'directory' && !e.name.startsWith('_')));
     // each work/job.* dir holds the audio being transcribed (plus, late in the
     // run, its finished outputs) — the audio is the one non-transcript file
     const working = [];
@@ -450,13 +514,15 @@ async function poll(){
         if(audio) working.push({name: audio.name, since: Date.parse(d.mtime)});
       }catch(e){ /* job dir vanished or not yet readable — next poll */ }
     }
-    server = {inbox, working, failed, transcripts, ok:true,
+    // both drop points are one queue as far as the UI is concerned
+    const queued = inbox.concat(nasInbox);
+    server = {inbox: queued, working, failed, transcripts, ok:true, nasOk,
               sumInbox: specIds(sInbox), sumWork: specIds(sWork), sumFailed: specIds(sFailed),
               sumProgress: progressMap(sWork)};
     // an upload the server now knows about is no longer "uploading"
     for(const n of Object.keys(uploads)){
       if(!uploads[n].error &&
-         (inbox.some(f => f.name === n) || working.some(w => w.name === n)))
+         (queued.some(f => f.name === n) || working.some(w => w.name === n)))
         delete uploads[n];
     }
     reconcileSumjobs();
@@ -464,6 +530,9 @@ async function poll(){
     server.ok = false;
   }
   document.body.classList.toggle('offline', !server.ok);
+  // Only meaningful when the box itself answered; if it didn't, the offline
+  // banner already says everything.
+  document.body.classList.toggle('nas-offline', server.ok && server.nasOk === false);
   render();
 }
 
@@ -504,42 +573,43 @@ function jobList(){
   return [...jobs.values()];
 }
 
+// One group per NAS archive folder. The folder name IS the stem, so unlike the
+// old flat listing there is no guessing which files belong together — we only
+// classify what each file inside it is. The source audio now lives here too
+// (the worker archives it beside its transcript); it is whatever is neither a
+// transcript format, a summary, nor the notes cache.
 function archiveGroups(){
-  const g = {};
-  const ensure = stem => g[stem] ||
-    (g[stem] = {stem, exts:[], summaries:[], notes:null, mtime:0, speakersBytes:0, txtBytes:0});
-  for(const f of server.transcripts.filter(e => e.type === 'file')){
-    // summaries attach to their transcript's group rather than forming one
-    const s = summaryInfo(f.name);
-    if(s){
-      const grp = ensure(s.stem);
-      grp.summaries.push({name: f.name, n: s.n, mtime: Date.parse(f.mtime)});
-      grp.mtime = Math.max(grp.mtime, Date.parse(f.mtime));
-      continue;
+  const groups = [];
+  for(const {stem, dirMtime, files} of server.transcripts){
+    const g = {stem, exts:[], summaries:[], notes:null, audio:null,
+               mtime: dirMtime || 0, speakersBytes:0, txtBytes:0};
+    for(const f of files.filter(e => e.type === 'file')){
+      const t = Date.parse(f.mtime);
+      g.mtime = Math.max(g.mtime, t);
+      const s = summaryInfo(f.name);
+      if(s && s.stem === stem){
+        g.summaries.push({name: f.name, n: s.n, mtime: t});
+        continue;
+      }
+      const nt = NOTES_RE.exec(f.name);
+      if(nt && nt[1] === stem){ g.notes = {name: f.name, mtime: t}; continue; }
+      if(isTranscript(f.name) && transcriptStem(f.name) === stem){
+        const ext = f.name.slice(stem.length + 1);
+        g.exts.push(ext);
+        // size of the text the summary worker will read, to estimate tokens
+        if(ext === 'speakers.txt') g.speakersBytes = f.size || 0;
+        else if(ext === 'txt')     g.txtBytes = f.size || 0;
+        continue;
+      }
+      // anything else in the folder is the archived source audio (it keeps its
+      // original upload name, so it may still carry .2ch/.lang-XX markers)
+      if(!g.audio) g.audio = {name: f.name, size: f.size || 0};
     }
-    // the condensed-notes cache likewise attaches to its transcript's group
-    const nt = NOTES_RE.exec(f.name);
-    if(nt){
-      const grp = ensure(nt[1]);
-      grp.notes = {name: f.name, mtime: Date.parse(f.mtime)};
-      grp.mtime = Math.max(grp.mtime, Date.parse(f.mtime));
-      continue;
-    }
-    const stem = transcriptStem(f.name);
-    if(stem === null) continue;
-    const ext = f.name.slice(stem.length + 1);
-    const grp = ensure(stem);
-    grp.exts.push(ext);
-    grp.mtime = Math.max(grp.mtime, Date.parse(f.mtime));
-    // remember the size of the text the summary worker will read, to estimate tokens
-    if(ext === 'speakers.txt') grp.speakersBytes = f.size || 0;
-    else if(ext === 'txt')     grp.txtBytes = f.size || 0;
+    g.exts.sort((a,b) => EXT_ORDER.indexOf(a) - EXT_ORDER.indexOf(b));
+    g.summaries.sort((a,b) => a.n - b.n);
+    groups.push(g);
   }
-  for(const v of Object.values(g)){
-    v.exts.sort((a,b) => EXT_ORDER.indexOf(a) - EXT_ORDER.indexOf(b));
-    v.summaries.sort((a,b) => a.n - b.n);
-  }
-  return Object.values(g).sort((a,b) => b.mtime - a.mtime);
+  return groups.sort((a,b) => b.mtime - a.mtime);
 }
 
 // rough token estimate (~4 chars/token) of the file the worker will summarize
@@ -686,8 +756,10 @@ function renderSumJobCard(j){
 function renderGroup(g){
   const fresh = Date.now() - g.mtime < 10 * 60 * 1000;
   const links = g.exts.map(ext =>
-    `<a href="/transcripts/${encodeURIComponent(g.stem + '.' + ext)}" download>.${ext}</a>`).join('')
-    + (g.notes ? `<a href="/transcripts/${encodeURIComponent(g.notes.name)}" download title="condensed running-notes cache used for chunked summaries">.notes.md</a>` : '');
+    `<a href="${fileUrl(g.stem, g.stem + '.' + ext)}" download>.${ext}</a>`).join('')
+    + (g.notes ? `<a href="${fileUrl(g.stem, g.notes.name)}" download title="condensed running-notes cache used for chunked summaries">.notes.md</a>` : '')
+    // the source audio is archived in the same folder — offer it for download
+    + (g.audio ? `<a href="${fileUrl(g.stem, g.audio.name)}" download title="source audio (${esc(fmtSize(g.audio.size))})">audio</a>` : '');
 
   // transcript preview
   const p = previews[g.stem];
@@ -701,7 +773,7 @@ function renderGroup(g){
   // existing summaries: numbered view/download chips + inline preview of open ones
   const sums = g.summaries.length ? `<div class="sums">
       <span class="lbl">summaries</span>
-      ${g.summaries.map(s => `<span class="sum-chip"><button data-action="toggle-summary" data-file="${esc(s.name)}">#${s.n} ${expanded.has(s.name) ? 'hide' : 'view'}</button><a href="/transcripts/${encodeURIComponent(s.name)}" download>.md</a></span>`).join('')}
+      ${g.summaries.map(s => `<span class="sum-chip"><button data-action="toggle-summary" data-file="${esc(s.name)}" data-stem="${esc(g.stem)}">#${s.n} ${expanded.has(s.name) ? 'hide' : 'view'}</button><a href="${fileUrl(g.stem, s.name)}" download>.md</a></span>`).join('')}
     </div>` : '';
   const sumPreviews = g.summaries.filter(s => expanded.has(s.name)).map(s => {
     const q = previews[s.name];
@@ -829,7 +901,7 @@ document.addEventListener('click', async ev => {
     if(expanded.has(file)){ expanded.delete(file); }
     else{
       expanded.add(file);
-      if(!previews[file]) loadSummary(file);
+      if(!previews[file]) loadSummary(btn.dataset.stem, file);
     }
     render();
   }else if(action === 'prompt'){
@@ -920,10 +992,10 @@ async function summarize(stem){
 const sumControl = (jobid, verb) =>
   fetch('/summaries/control/' + encodeURIComponent(jobid + '.' + verb), {method:'PUT', body:'1'});
 
-async function loadSummary(file){
+async function loadSummary(stem, file){
   previews[file] = {loading:true};
   try{
-    const r = await fetch('/transcripts/' + encodeURIComponent(file), {cache:'no-store'});
+    const r = await fetch(fileUrl(stem, file), {cache:'no-store'});
     if(r.ok) previews[file] = {text: await r.text()};
     else previews[file] = {error: 'HTTP ' + r.status};
   }catch(e){ previews[file] = {error: e.message || 'network error'}; }
@@ -938,7 +1010,7 @@ async function loadPreview(stem){
   previews[stem] = {loading:true};
   for(const ext of ['speakers.txt', 'txt']){
     try{
-      const r = await fetch('/transcripts/' + encodeURIComponent(stem + '.' + ext), {cache:'no-store'});
+      const r = await fetch(fileUrl(stem, stem + '.' + ext), {cache:'no-store'});
       if(r.ok){ previews[stem] = {text: await r.text()}; render(); return; }
     }catch(e){}
   }
