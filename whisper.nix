@@ -343,14 +343,39 @@ let
           # and later the summaries the summarize worker writes alongside.
           # A failure here fails the job on purpose: without the NAS there is
           # nowhere to put the result, and the audio must go back in a queue.
+          #
+          # ORDER MATTERS: the outputs go first and the source audio LAST. The
+          # share can die halfway through (it is an automounted CIFS mount on a
+          # box that is off most of the time), and the audio is the only thing
+          # here that cannot be regenerated — so it must stay in $job, the one
+          # place the requeue below can always find it, until everything else
+          # has landed. Moving it first meant a mid-move failure requeued
+          # nothing (the file had already gone to $dest) and then `rm -rf $job`
+          # deleted the transcripts: the job reported FAILED, nothing retried,
+          # and the GPU work was lost. Partial outputs left in $dest by such a
+          # failure are harmless — the retry re-transcribes and overwrites them.
           dest=$NASROOT/$outstem
-          if mkdir -p "$dest" 2>/dev/null \
-             && mv -f "$job/$input" "$dest/$name" 2>/dev/null \
-             && find "$job" -mindepth 1 -maxdepth 1 -exec mv -f -t "$dest" {} +; then
+          moved=1
+          if mkdir -p "$dest" 2>/dev/null; then
+            for f in "$job"/*; do
+              # exact string compare, not a find/-name glob: stems are user
+              # filenames and routinely contain brackets and spaces.
+              if [ "$f" = "$job/$input" ]; then continue; fi
+              mv -f "$f" "$dest"/ 2>/dev/null || { moved=0; break; }
+            done
+          else
+            moved=0
+          fi
+          # Only now the audio, under its original upload name so any
+          # .2ch/.lang-XX marker stays visible in the archive.
+          if [ "$moved" = 1 ] && mv -f "$job/$input" "$dest/$name" 2>/dev/null; then
             rmdir "$job" 2>/dev/null || true
             echo "done: $name -> $dest/"
           else
             echo "FAILED: $name — NAS write to $dest failed (share offline?); requeueing audio"
+            # Guaranteed to still be here: nothing above moves it unless every
+            # output already landed. Back to the LOCAL inbox, which is always
+            # writable even while the share is down.
             mv -f "$job/$input" "$INBOX/$name" 2>/dev/null || true
             rm -rf "$job"
           fi
