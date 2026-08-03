@@ -2,11 +2,59 @@
 
 let
   # abcde expands these itself at rip time, so the $-refs have to survive both
-  # Nix and the shell that sources /etc/abcde.conf. Double-quoted Nix strings
-  # here (plain \$ escape); single-quoted in the config below so the sourcing
-  # shell does not expand them either.
+  # Nix and the shell that sources the config. Double-quoted Nix strings here
+  # (plain \$ escape); single-quoted in the config below, inside a quoted
+  # heredoc, so neither the build shell nor the sourcing shell expands them.
   outFmt   = "\${ARTISTFILE}/\${ALBUMFILE}/\${TRACKNUM}.\${TRACKFILE}";
   vaOutFmt = "Various-\${ALBUMFILE}/\${TRACKNUM}.\${ARTISTFILE}-\${TRACKFILE}";
+
+  # NOT /etc/abcde.conf. nixpkgs substitutes abcde's sysconfdir with the
+  # package's OWN store directory, so the script sources
+  # <abcde-store-path>/etc/abcde.conf and never looks at /etc at all — an
+  # environment.etc entry here is silently ignored and you get the upstream
+  # defaults (ogg into $HOME). Overriding the package's copy is therefore the
+  # only way to set system-wide defaults, and it keeps the intended precedence:
+  # the script sources this first, then ~/.abcde.conf, so a user can still
+  # override any of it per-user.
+  abcdeConfigured = pkgs.abcde.overrideAttrs (old: {
+    postInstall = (old.postInstall or "") + ''
+      cat > $out/etc/abcde.conf <<'ABCDECONF'
+      # MP3 out. abcde's own default is ogg/vorbis, and OUTPUTTYPE is what
+      # switches it; MP3ENCODERSYNTAX picks the encoder binary (lame).
+      OUTPUTTYPE=mp3
+      MP3ENCODERSYNTAX=lame
+      # -V 2 is LAME's variable-bitrate ~190kbps setting — transparent for
+      # almost all material and smaller than a fixed 320. Use -b 320 for CBR.
+      LAMEOPTS='-V 2'
+
+      # Where finished albums land. On the NAS so a rip is immediately
+      # reachable from every machine, like the transcription archive.
+      OUTPUTDIR=/media/NAS/Netspace/music
+
+      # Intermediate WAVs must NOT go to OUTPUTDIR: abcde rips to WAV first and
+      # encodes afterwards, so leaving this unset would push ~600MB per disc
+      # over CIFS and read it straight back. Keep the scratch on the local SSD.
+      # (Unset, abcde uses $HOME — which is what the first rip here did.)
+      WAVOUTPUTDIR=/var/tmp/abcde
+
+      # Tag lookup. The freedb servers abcde historically defaulted to have been
+      # dead for years; musicbrainz is the live database. A disc that is not in
+      # it still rips, but lands under Unknown Artist/Unknown Album.
+      CDDBMETHOD=musicbrainz
+
+      # <Artist>/<Album>/<NN.Track>.mp3, and the same for compilations except
+      # the per-track artist is kept (VA discs otherwise collapse to one artist).
+      OUTPUTFORMAT='${outFmt}'
+      VAOUTPUTFORMAT='${vaOutFmt}'
+      # Zero-pad track numbers so 2 sorts before 10 in players and file browsers.
+      PADTRACKS=y
+
+      # Encode while the next track is still being read, and use both spare cores.
+      MAXPROCS=3
+      EJECTCD=y
+      ABCDECONF
+    '';
+  });
 in
 
 {
@@ -198,53 +246,13 @@ in
 
     # CD ripping. abcde shells out to these by name, so they must be on $PATH
     # alongside it or a rip dies mid-run with "command not found".
-    abcde
+    abcdeConfigured   # abcde + our defaults baked into its own etc/abcde.conf
     cdparanoia   # the ripper abcde drives
     lame         # MP3 encoder
-    flac         # abcde's default output format / for lossless rips
+    flac         # for lossless rips (abcde -o flac); its own default is ogg
     eject        # abcde ejects the disc when done
     cdrtools     # cdda2wav / CD-Text fallback readers
   ];
-
-  # --- CD ripping defaults --------------------------------------------------
-  # abcde reads /etc/abcde.conf first, then ~/.abcde.conf (which may override
-  # any of this). Keeping the defaults here rather than in a hand-placed dotfile
-  # means `abcde` with no arguments does the right thing for every user and the
-  # settings are version-controlled like everything else on this box.
-  environment.etc."abcde.conf".text = ''
-    # MP3 out. abcde's own default is FLAC, and OUTPUTTYPE is what switches it;
-    # MP3ENCODERSYNTAX picks which encoder binary drives it (lame, installed above).
-    OUTPUTTYPE=mp3
-    MP3ENCODERSYNTAX=lame
-    # -V 2 is LAME's variable-bitrate ~190kbps setting — transparent for almost
-    # all material and smaller than a fixed 320. Use -b 320 instead for CBR.
-    LAMEOPTS='-V 2'
-
-    # Where finished albums land. On the NAS so a rip is immediately reachable
-    # from every machine, like the transcription archive.
-    OUTPUTDIR=/media/NAS/Netspace/music
-
-    # Intermediate WAVs must NOT go to OUTPUTDIR: abcde writes the raw rip first
-    # and encodes afterwards, so leaving this unset would push ~600MB per disc
-    # over CIFS and read it straight back. Keep the scratch on the local SSD.
-    WAVOUTPUTDIR=/var/tmp/abcde
-
-    # Tag lookup. musicbrainz is the live database; the freedb servers abcde
-    # defaults to have been dead for years, and without this a rip silently
-    # produces "Track 01"-style names with no artist/album tags.
-    CDDBMETHOD=musicbrainz
-
-    # <Artist>/<Album>/<NN.Track>.mp3, and the same for compilations except the
-    # per-track artist is kept (VA discs otherwise collapse to one bogus artist).
-    OUTPUTFORMAT='${outFmt}'
-    VAOUTPUTFORMAT='${vaOutFmt}'
-    # Zero-pad track numbers so 2 sorts before 10 in every player and file browser.
-    PADTRACKS=y
-
-    # Encode while the next track is still being read, and use both spare cores.
-    MAXPROCS=3
-    EJECTCD=y
-  '';
 
   # abcde does not create WAVOUTPUTDIR itself — a rip aborts on the first track
   # if it is missing. Sticky + world-writable like /var/tmp so any user can rip;
