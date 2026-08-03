@@ -1,5 +1,14 @@
 { config, pkgs, ... }:
 
+let
+  # abcde expands these itself at rip time, so the $-refs have to survive both
+  # Nix and the shell that sources /etc/abcde.conf. Double-quoted Nix strings
+  # here (plain \$ escape); single-quoted in the config below so the sourcing
+  # shell does not expand them either.
+  outFmt   = "\${ARTISTFILE}/\${ALBUMFILE}/\${TRACKNUM}.\${TRACKFILE}";
+  vaOutFmt = "Various-\${ALBUMFILE}/\${TRACKNUM}.\${ARTISTFILE}-\${TRACKFILE}";
+in
+
 {
   imports = [
     ./hardware-configuration.nix
@@ -136,7 +145,9 @@
   users.users.phylax = {
     isNormalUser = true;
     description = "Phylax";
-    extraGroups = [ "networkmanager" "wheel" ];
+    # "cdrom" is required to rip: /dev/sr0 is brw-rw---- root:cdrom, so without
+    # it abcde/cdparanoia fail with permission denied as a non-root user.
+    extraGroups = [ "networkmanager" "wheel" "cdrom" ];
     openssh.authorizedKeys.keys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOUfngoK+AS94LbMt7PaxLkquhHtmpa0YiUdDBkuT1iN services@olivermotz.com"
     ];
@@ -184,6 +195,62 @@
                  # runs its own pinned python via an absolute store path, so this
                  # is only for interactive use, not a dependency of any service)
     cifs-utils   # mount.cifs helper for the NAS mount above
+
+    # CD ripping. abcde shells out to these by name, so they must be on $PATH
+    # alongside it or a rip dies mid-run with "command not found".
+    abcde
+    cdparanoia   # the ripper abcde drives
+    lame         # MP3 encoder
+    flac         # abcde's default output format / for lossless rips
+    eject        # abcde ejects the disc when done
+    cdrtools     # cdda2wav / CD-Text fallback readers
+  ];
+
+  # --- CD ripping defaults --------------------------------------------------
+  # abcde reads /etc/abcde.conf first, then ~/.abcde.conf (which may override
+  # any of this). Keeping the defaults here rather than in a hand-placed dotfile
+  # means `abcde` with no arguments does the right thing for every user and the
+  # settings are version-controlled like everything else on this box.
+  environment.etc."abcde.conf".text = ''
+    # MP3 out. abcde's own default is FLAC, and OUTPUTTYPE is what switches it;
+    # MP3ENCODERSYNTAX picks which encoder binary drives it (lame, installed above).
+    OUTPUTTYPE=mp3
+    MP3ENCODERSYNTAX=lame
+    # -V 2 is LAME's variable-bitrate ~190kbps setting — transparent for almost
+    # all material and smaller than a fixed 320. Use -b 320 instead for CBR.
+    LAMEOPTS='-V 2'
+
+    # Where finished albums land. On the NAS so a rip is immediately reachable
+    # from every machine, like the transcription archive.
+    OUTPUTDIR=/media/NAS/Netspace/music
+
+    # Intermediate WAVs must NOT go to OUTPUTDIR: abcde writes the raw rip first
+    # and encodes afterwards, so leaving this unset would push ~600MB per disc
+    # over CIFS and read it straight back. Keep the scratch on the local SSD.
+    WAVOUTPUTDIR=/var/tmp/abcde
+
+    # Tag lookup. musicbrainz is the live database; the freedb servers abcde
+    # defaults to have been dead for years, and without this a rip silently
+    # produces "Track 01"-style names with no artist/album tags.
+    CDDBMETHOD=musicbrainz
+
+    # <Artist>/<Album>/<NN.Track>.mp3, and the same for compilations except the
+    # per-track artist is kept (VA discs otherwise collapse to one bogus artist).
+    OUTPUTFORMAT='${outFmt}'
+    VAOUTPUTFORMAT='${vaOutFmt}'
+    # Zero-pad track numbers so 2 sorts before 10 in every player and file browser.
+    PADTRACKS=y
+
+    # Encode while the next track is still being read, and use both spare cores.
+    MAXPROCS=3
+    EJECTCD=y
+  '';
+
+  # abcde does not create WAVOUTPUTDIR itself — a rip aborts on the first track
+  # if it is missing. Sticky + world-writable like /var/tmp so any user can rip;
+  # the 10d age lets systemd-tmpfiles reap WAVs left behind by an aborted rip.
+  systemd.tmpfiles.rules = [
+    "d /var/tmp/abcde 1777 root root 10d"
   ];
 
   # --- Nix ------------------------------------------------------------------
