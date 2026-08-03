@@ -17,6 +17,18 @@ let
   # the script sources this first, then ~/.abcde.conf, so a user can still
   # override any of it per-user.
   abcdeConfigured = pkgs.abcde.overrideAttrs (old: {
+    # abcde maps an unrecognised/absent genre to ID3 id 255, but 255 is not a
+    # valid ID3v1 genre — it is abcde's private "unknown" marker. eyeD3 0.9
+    # (the tagger for the default ID3TAGV=id3v2.4) validates the id and dies
+    # with GenreException, so EVERY track's tag step fails on any disc that is
+    # not in MusicBrainz. That is not a cosmetic failure: tagging sits before
+    # `move` in abcde's action chain, so the rip never leaves the temp dir and
+    # nothing reaches OUTPUTDIR. Map the unknown case to 12 ("Other"), a real
+    # genre id, instead. Preferred over switching to ID3TAGV=id3v2.3/id3v2,
+    # which tolerates 255 but writes latin1 tags rather than eyeD3's utf16.
+    postPatch = (old.postPatch or "") + ''
+      substituteInPlace abcde --replace-fail 'id=255' 'id=12'
+    '';
     postInstall = (old.postInstall or "") + ''
       cat > $out/etc/abcde.conf <<'ABCDECONF'
       # MP3 out. abcde's own default is ogg/vorbis, and OUTPUTTYPE is what
