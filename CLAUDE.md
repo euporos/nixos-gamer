@@ -463,6 +463,12 @@ like transcripts.
   keyed by a friendly name. Add a preset = add an attribute + `nix run .#deploy`.
   Missing/broken `/prompts.json` just hides the dropdown; the free-text box still
   works. Ships with one preset, `diary`.
+- **Copy buttons** (transcript `copy` in the card row, per-summary `copy` in
+  each `#N` chip) re-fetch the file `no-store` and put it on the clipboard.
+  The UI is plain `http://<LAN ip>` — **not a secure context**, so
+  `navigator.clipboard` is undefined; `copyText()` falls back to a hidden
+  textarea + `execCommand('copy')` (verified working over http). Don't "clean
+  up" that fallback.
 
 ## Electricity / idle power (`disk-spindown.nix`)
 

@@ -388,6 +388,7 @@ let presets = {};
 const sumjobs = JSON.parse(localStorage.getItem('whispersumjobs') || '{}');
 const saveSumjobs = () => localStorage.setItem('whispersumjobs', JSON.stringify(sumjobs));
 const summaryErr = {};         // stem -> last queue-submission error string
+const copyState = {};          // 't:<stem>' | 's:<summary file>' -> 'copied' | 'failed' (brief button feedback)
 // last markup written into #archive — polling usually produces byte-identical
 // HTML, and re-assigning innerHTML anyway would reset preview scroll + focus
 let archiveHtml = null;
@@ -761,6 +762,8 @@ function renderGroup(g){
     // the source audio is archived in the same folder — offer it for download
     + (g.audio ? `<a href="${fileUrl(g.stem, g.audio.name)}" download title="source audio (${esc(fmtSize(g.audio.size))})">audio</a>` : '');
 
+  const copyLbl = k => copyState[k] || 'copy';
+
   // transcript preview
   const p = previews[g.stem];
   // data-scroll = the key render() carries the scroll offset over with
@@ -773,7 +776,7 @@ function renderGroup(g){
   // existing summaries: numbered view/download chips + inline preview of open ones
   const sums = g.summaries.length ? `<div class="sums">
       <span class="lbl">summaries</span>
-      ${g.summaries.map(s => `<span class="sum-chip"><button data-action="toggle-summary" data-file="${esc(s.name)}" data-stem="${esc(g.stem)}">#${s.n} ${expanded.has(s.name) ? 'hide' : 'view'}</button><a href="${fileUrl(g.stem, s.name)}" download>.md</a></span>`).join('')}
+      ${g.summaries.map(s => `<span class="sum-chip"><button data-action="toggle-summary" data-file="${esc(s.name)}" data-stem="${esc(g.stem)}">#${s.n} ${expanded.has(s.name) ? 'hide' : 'view'}</button><button data-action="copy" data-file="${esc(s.name)}" data-stem="${esc(g.stem)}" title="copy summary #${s.n} to the clipboard">${copyLbl('s:' + s.name)}</button><a href="${fileUrl(g.stem, s.name)}" download>.md</a></span>`).join('')}
     </div>` : '';
   const sumPreviews = g.summaries.filter(s => expanded.has(s.name)).map(s => {
     const q = previews[s.name];
@@ -827,6 +830,7 @@ function renderGroup(g){
       <span class="spacer"></span>
       <div class="actions">
         <button class="preview-btn" data-action="toggle" data-name="${esc(g.stem)}">${expanded.has(g.stem) ? 'hide' : 'view'}</button>
+        <button class="preview-btn" data-action="copy" data-stem="${esc(g.stem)}" title="copy the transcript (.speakers.txt, else .txt) to the clipboard">${copyLbl('t:' + g.stem)}</button>
         <button class="sum-btn" data-action="prompt" data-name="${esc(g.stem)}">${promptOpen.has(g.stem) ? '- prompt' : '+ prompt'}</button>
         <button class="sum-btn" data-action="summarize" data-name="${esc(g.stem)}">summarize</button>
       </div>
@@ -904,6 +908,19 @@ document.addEventListener('click', async ev => {
       if(!previews[file]) loadSummary(btn.dataset.stem, file);
     }
     render();
+  }else if(action === 'copy'){
+    const {stem, file} = btn.dataset;
+    const key = file ? 's:' + file : 't:' + stem;
+    let ok = false;
+    try{
+      // always fetch fresh — the file may have been corrected on the share
+      const text = file ? await fetchText(fileUrl(stem, file))
+                        : await fetchTranscript(stem);
+      ok = text != null && await copyText(text);
+    }catch(e){}
+    copyState[key] = ok ? 'copied' : 'failed';
+    render();
+    setTimeout(() => { delete copyState[key]; render(); }, 1500);
   }else if(action === 'prompt'){
     if(promptOpen.has(name)) promptOpen.delete(name); else promptOpen.add(name);
     render();
@@ -1005,6 +1022,41 @@ async function loadSummary(stem, file){
 // Non-empty body required — see sumControl (nginx rejects a zero-length PUT).
 const control = (name, verb) =>
   fetch('/control/' + encodeURIComponent(name + '.' + verb), {method:'PUT', body:'1'});
+
+// text of a file, or null on any HTTP/network failure
+async function fetchText(url){
+  try{
+    const r = await fetch(url, {cache:'no-store'});
+    return r.ok ? await r.text() : null;
+  }catch(e){ return null; }
+}
+// same source preference as the preview and the summarizer: .speakers.txt, else .txt
+async function fetchTranscript(stem){
+  for(const ext of ['speakers.txt', 'txt']){
+    const t = await fetchText(fileUrl(stem, stem + '.' + ext));
+    if(t != null) return t;
+  }
+  return null;
+}
+
+// The UI is served over plain http://<LAN ip>, which is NOT a secure context,
+// so navigator.clipboard is undefined there — fall back to the legacy
+// hidden-textarea + execCommand('copy'), which still works on http.
+async function copyText(text){
+  if(window.isSecureContext && navigator.clipboard){
+    try{ await navigator.clipboard.writeText(text); return true; }catch(e){}
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+  document.body.appendChild(ta);   // outside #archive, so render() isn't blocked
+  ta.select();
+  let ok = false;
+  try{ ok = document.execCommand('copy'); }catch(e){}
+  ta.remove();
+  return ok;
+}
 
 async function loadPreview(stem){
   previews[stem] = {loading:true};
