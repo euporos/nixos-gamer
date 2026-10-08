@@ -76,6 +76,7 @@ in
     ./disk-spindown.nix
     ./whisper.nix
     ./summarize.nix
+    ./local-llm.nix
     ./sops.nix
   ];
 

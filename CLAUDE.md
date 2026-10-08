@@ -470,6 +470,29 @@ like transcripts.
   textarea + `execCommand('copy')` (verified working over http). Don't "clean
   up" that fallback.
 
+## Interactive LLM endpoint (`local-llm.nix`)
+
+`POST http://192.168.85.30:8990/v1/chat/completions` — OpenAI-shaped,
+synchronous, same Ollama/Qwen3 as the summarizer. First client: the Emacs
+proofreader `tchecker` (`~/config/emacs/modules/tchecker.el`), which tries this
+first and falls back to OpenAI when the box is off **or busy**.
+
+- nginx proxies to `llm-proxy.service` (stdlib Python on `127.0.0.1:11435`,
+  `DynamicUser` + group `whisper` for the lock file). Ollama itself stays on
+  localhost: no auth, and a direct call would bypass the GPU lock.
+- **GPU lock, non-blocking**: the proxy `flock -n`s `/run/whisper-gpu.lock`;
+  if a transcription or summary holds it → **503 `gpu_busy`** immediately
+  (clients fall back, they don't wait). The lock is the only race-free busy
+  signal — the `/status/*` listings are a snapshot a job can start right after.
+- **Warm window**: after a request the proxy *keeps* the lock and the model
+  loaded for `LLM_PROXY_IDLE_SECS` (180s), so back-to-back calls skip the ~9 GB
+  reload. On expiry it unloads, waits for `/api/ps` to clear, then releases.
+  Lock and warm model are inseparable — a resident model without the lock would
+  let whisper start next to it and OOM. Cost: a queued transcription/summary
+  waits up to one window.
+- The request's `model` is ignored (always `qwen3:14b`); `num_ctx` 8192 (enough
+  for tchecker's 10k-char cap in + out). Logs: `journalctl -u llm-proxy`.
+
 ## Electricity / idle power (`disk-spindown.nix`)
 
 This is an old Zen1 gaming tower (Ryzen 5 1600X + GTX 1080 Ti + 32GB), a
