@@ -89,6 +89,34 @@ from a machine without that alias needs it added first.
     GRUB writes its stub to the empty `/boot/efi` dir on the ext4 root instead
     of the real ESP, and the bootloader silently isn't updated.
 
+## Hangs and self-recovery (`resilience.nix`)
+
+**2026-10-08 the box hard-froze while idle** (GPU unloaded, nothing running):
+no kernel message, network dead, still drawing **82 W** on the Shelly plug.
+Likely the Zen 1 idle-freeze erratum (deep C6 at near-zero load); the board is
+a **Gigabyte AX370-Gaming 5 on BIOS F8 (2017)**, older than the AGESA fix.
+
+- **A frozen box ignores WoL** (it's not in S5), and after cutting power at the
+  plug it **stayed at 2 W**: the firmware doesn't power on after AC loss, and
+  the RTL8125B NIC doesn't answer WoL after a full AC loss either (r8169 arms
+  WoL at each OS boot; AC loss resets it). Recovery took someone pressing the
+  power button. Pending, needs someone at the box: BIOS **"Restore on AC Power
+  Loss" → Power On** (then the Shelly is a remote power button from any state);
+  ideally a BIOS update + "Power Supply Idle Control: Typical Current Idle",
+  after which `processor.max_cstate=1` can go.
+- Now in place: `processor.max_cstate=1` (prevention); the `sp5100_tco`
+  hardware watchdog driven by systemd (`RuntimeWatchdogSec=30s`) — **not
+  tested end-to-end**, because a failed test would strand the box; panic on
+  oops / hard lockup + reboot after 10 s; journald syncing every 30 s (with the
+  5-min default the last minutes before the freeze were lost from the log).
+- **Diagnosing the next one**: `journalctl --list-boots`; a boot whose last
+  lines are *not* the `systemd-shutdown` sequence ended abruptly. Read it with
+  `journalctl -b -1 --since "YYYY-MM-DD HH:MM"` — a bare `--since HH:MM` means
+  *today*. A watchdog-triggered reset shows up as a new boot after the gap.
+- Opening `/dev/watchdog0` (e.g. `wdctl`) can arm the timer; `wdctl` disarms it
+  again on exit (magic close), so reading is safe — but don't hold the device
+  open from scripts while systemd owns it.
+
 ## Wake-on-LAN + remote OS selection
 
 The box is off most of the time and dual-boots NixOS/Windows. WoL powers it on

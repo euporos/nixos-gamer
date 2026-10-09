@@ -77,6 +77,7 @@ in
     ./whisper.nix
     ./summarize.nix
     ./local-llm.nix
+    ./resilience.nix
     ./sops.nix
   ];
 
