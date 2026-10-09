@@ -181,7 +181,8 @@ per transcript**:
 ```
 /media/NAS/Netspace/artifacts/transcriptions/
   _inbox/         audio drop point — copy a file here from any machine
-  _failed/        failed + cancelled audio (UI "requeue" moves it back to _inbox/)
+  _failed/        failed + cancelled audio (UI "requeue" moves it back to _inbox/,
+                  "dismiss" parks it in _failed/_dismissed/ — never deleted)
   <stem>/         source audio + .txt/.srt/.vtt/.tsv/.json/.speakers.txt
                   + <stem>.summary[.N].md + <stem>.notes.md
 ```
@@ -234,8 +235,8 @@ file you edited.
   (`whisper-ui/index.html`, no build step, no backend daemon). It polls nginx
   `autoindex_format json` listings under
   `/status/{inbox,nas-inbox,work,failed,transcripts}/` to show all jobs
-  (including CLI/scp/NAS-copy uploads), and cancels/requeues by
-  PUTting `<name>.cancel` / `<name>.requeue` sentinels to `/control/`, handled
+  (including CLI/scp/NAS-copy uploads), and cancels/requeues/dismisses by
+  PUTting `<name>.cancel` / `<name>.requeue` / `<name>.dismiss` sentinels to `/control/`, handled
   by the `whisper-control` path unit (kills the `whisper-job` podman
   container, or moves files between the inboxes and `_failed/`). A cancelled
   job's audio lands in `_failed/` like any failure. **Sentinel PUTs must have a

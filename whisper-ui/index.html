@@ -328,7 +328,8 @@
   — picked up within ~30s (polled; CIFS can't be watched)<br>
   everything is archived per transcript in <code>…/artifacts/transcriptions/&lt;stem&gt;/</code>
   — edit a transcript there and the next summary is built from your edit<br>
-  cancelled &amp; failed audio lands in <code>_failed/</code> — requeue re-runs it
+  cancelled &amp; failed audio lands in <code>_failed/</code> — requeue re-runs it,
+  dismiss parks it in <code>_failed/_dismissed/</code>
 </footer>
 
 <script>
@@ -645,7 +646,8 @@ function render(){
       actions = `<button data-action="cancel" data-name="${esc(job.name)}">kill</button>`;
     }else{ // failed | cancelled
       metaHtml = `<span class="meta">${fmtWhen(job.mtime)}</span>`;
-      actions = `<button class="requeue" data-action="requeue" data-name="${esc(job.name)}">requeue</button>`;
+      actions = `<button class="requeue" data-action="requeue" data-name="${esc(job.name)}">requeue</button>` +
+                `<button data-action="dismiss" data-name="${esc(job.name)}">dismiss</button>`;
     }
     return `<div class="job ${job.state}">
       <div class="row">
@@ -892,6 +894,11 @@ document.addEventListener('click', async ev => {
     btn.disabled = true;
     if(meta[name]) { delete meta[name].cancelled; saveMeta(); }
     try{ await control(name, 'requeue'); }catch(e){}
+    setTimeout(poll, 1500);
+  }else if(action === 'dismiss'){
+    btn.disabled = true;
+    if(meta[name]) { delete meta[name]; saveMeta(); }
+    try{ await control(name, 'dismiss'); }catch(e){}
     setTimeout(poll, 1500);
   }else if(action === 'toggle'){
     if(expanded.has(name)){ expanded.delete(name); }

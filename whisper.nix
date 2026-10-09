@@ -393,6 +393,9 @@ let
   #   <name>.cancel   kill the job for <name> — queued (mv inbox -> failed)
   #                   or already running (podman kill the job container)
   #   <name>.requeue  move failed/<name> back into the inbox
+  #   <name>.dismiss  move failed/<name> into failed/_dismissed/ — clears it
+  #                   from the UI (which lists only files at the top level)
+  #                   without deleting anyone's audio
   # Sentinels are always consumed, even when nothing matches — a path unit on
   # DirectoryNotEmpty would otherwise re-trigger forever.
   control = pkgs.writeShellApplication {
@@ -444,6 +447,15 @@ let
         # rename on the share, no copy back and forth over the wire.
         if [ -f "$FAILED/$name" ] && mv "$FAILED/$name" "$NASINBOX/$name" 2>/dev/null; then
           echo "requeue: $name -> _inbox"
+        fi
+      done
+
+      for s in "$CONTROL"/*.dismiss; do
+        name=$(basename "''${s%.dismiss}")
+        rm -f "$s"
+        if [ -f "$FAILED/$name" ] && mkdir -p "$FAILED/_dismissed" 2>/dev/null \
+           && mv "$FAILED/$name" "$FAILED/_dismissed/$name" 2>/dev/null; then
+          echo "dismiss: $name -> _failed/_dismissed"
         fi
       done
     '';
@@ -707,7 +719,7 @@ in
   };
 
   systemd.services.whisper-control = {
-    description = "Apply cancel/requeue sentinels from /srv/whisper/control";
+    description = "Apply cancel/requeue/dismiss sentinels from /srv/whisper/control";
     serviceConfig = {
       Type = "oneshot";
       ExecStart = lib.getExe control;
@@ -717,7 +729,7 @@ in
   };
 
   systemd.paths.whisper-control = {
-    description = "Watch the whisper control dir for cancel/requeue sentinels";
+    description = "Watch the whisper control dir for cancel/requeue/dismiss sentinels";
     wantedBy = [ "multi-user.target" ];
     pathConfig.DirectoryNotEmpty = "/srv/whisper/control";
   };
