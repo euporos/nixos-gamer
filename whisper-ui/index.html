@@ -393,6 +393,7 @@ const copyState = {};          // 't:<stem>' | 's:<summary file>' -> 'copied' | 
 // last markup written into #archive — polling usually produces byte-identical
 // HTML, and re-assigning innerHTML anyway would reset preview scroll + focus
 let archiveHtml = null;
+let jobsHtmlShown = null;     // last markup put into #jobs (see render())
 
 /* ---------- helpers ---------- */
 const $ = sel => document.querySelector(sel);
@@ -638,7 +639,7 @@ function render(){
       actions = `<button data-action="cancel" data-name="${esc(job.name)}">cancel</button>`;
     }else if(job.state === 'transcribing'){
       const eta = dur ? (ETA_OVERHEAD_S + dur / RT_FACTOR) * 1000 : 0;
-      metaHtml = `<span class="elapsed" data-since="${job.since}">${fmtElapsed(Date.now() - job.since)}</span>` +
+      metaHtml = `<span class="elapsed" data-since="${job.since}"></span>` +
                  (eta ? `<span class="meta"> / ~${fmtElapsed(eta)}</span>` : '');
       bar = eta
         ? `<div class="bar"><i data-since="${job.since}" data-eta="${eta}"></i></div>`
@@ -659,8 +660,16 @@ function render(){
       </div>${bar}
     </div>`;
   }).join('') + sumJobs.map(renderSumJobCard).join('');
-  $('#jobs').innerHTML = (jobs.length || sumJobs.length)
+  // Same reason as the archive below: replacing the nodes on every poll eats
+  // clicks (a rebuild between mousedown and mouseup leaves no button to click),
+  // so only swap when the markup actually changed. Elapsed counters are emitted
+  // empty and filled by tick(), which keeps the markup time-invariant.
+  const jobsMarkup = (jobs.length || sumJobs.length)
     ? jobsHtml : '<div class="empty">nothing queued, nothing running</div>';
+  if(jobsMarkup !== jobsHtmlShown){
+    $('#jobs').innerHTML = jobsMarkup;
+    jobsHtmlShown = jobsMarkup;
+  }
 
   const groups = archiveGroups();
   // Rebuilding #archive replaces every node, which resets the scroll offset of
@@ -732,7 +741,7 @@ function renderSumJobCard(j){
   // no ETA — a summary's length varies (single-pass vs. chunked condense), so
   // just tick up the elapsed time, clocked from when the spec entered work/
   const elapsed = (j.state === 'running' && j.since)
-    ? `<span class="elapsed" data-since="${j.since}">${fmtElapsed(Date.now() - j.since)}</span>` : '';
+    ? `<span class="elapsed" data-since="${j.since}"></span>` : '';
   const ptxt = j.state === 'running' ? sumProgressText(j.prog) : '';
   const prog = ptxt ? `<span class="meta">${esc(ptxt)}</span>` : '';
   // during a chunked condense the bar can be determinate (done/total); otherwise
@@ -881,22 +890,29 @@ function tick(){
 }
 
 /* ---------- actions ---------- */
+// disable a control button while its action lands; re-enable after a while,
+// because #jobs keeps its nodes when the markup didn't change, so an action
+// that had no effect would otherwise leave the button dead
+function busy(btn){
+  btn.disabled = true;
+  setTimeout(() => { btn.disabled = false; }, 10000);
+}
 document.addEventListener('click', async ev => {
   const btn = ev.target.closest('button[data-action]');
   if(!btn) return;
   const {action, name} = btn.dataset;
   if(action === 'cancel'){
-    btn.disabled = true;
+    busy(btn);
     (meta[name] || (meta[name] = {})).cancelled = Date.now(); saveMeta();
     try{ await control(name, 'cancel'); }catch(e){}
     setTimeout(poll, 1500);
   }else if(action === 'requeue'){
-    btn.disabled = true;
+    busy(btn);
     if(meta[name]) { delete meta[name].cancelled; saveMeta(); }
     try{ await control(name, 'requeue'); }catch(e){}
     setTimeout(poll, 1500);
   }else if(action === 'dismiss'){
-    btn.disabled = true;
+    busy(btn);
     if(meta[name]) { delete meta[name]; saveMeta(); }
     try{ await control(name, 'dismiss'); }catch(e){}
     setTimeout(poll, 1500);
@@ -935,7 +951,7 @@ document.addEventListener('click', async ev => {
     summarize(name);
   }else if(action === 'sum-cancel'){
     const jobid = btn.dataset.jobid;
-    btn.disabled = true;
+    busy(btn);
     if(sumjobs[jobid]){ sumjobs[jobid].cancelled = Date.now(); saveSumjobs(); }
     try{ await sumControl(jobid, 'cancel'); }catch(e){}
     setTimeout(poll, 1200);

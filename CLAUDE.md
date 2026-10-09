@@ -481,6 +481,10 @@ like transcripts.
   emitted as *empty* `<span class="elapsed" data-since=…>` and filled in place by
   `tick()` (run at the end of `render()`), never interpolated into the HTML
   string — otherwise a running job makes every poll "different" and rebuilds.
+  The top **`#jobs` list** gets defense (2) too, for a different reason: a
+  rebuild landing between mousedown and mouseup swallows the click (seen as a
+  `dismiss` that never sent its PUT). Since its nodes now persist, a clicked
+  control button re-enables itself after 10s (`busy()`) in case nothing changed.
 - **Named prompt presets** (`summarize-prompts.nix`): a standalone Nix attrset
   of `name → prompt text` — the one place to add/experiment with reusable
   summary prompts. `whisper.nix` renders it to `/prompts.json` (via
