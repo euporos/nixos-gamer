@@ -112,15 +112,31 @@ a **Gigabyte AX370-Gaming 5 on BIOS F8 (2017)**, older than the AGESA fix.
   (2026-10-12, cause unknown). Relay: `/relay/0?turn=off|on` — but see above:
   until the BIOS AC-loss setting is changed, switching it off leaves the box
   off for good.
-- Now in place: `processor.max_cstate=1` (prevention); the `sp5100_tco`
-  hardware watchdog driven by systemd (`RuntimeWatchdogSec=30s`) — **not
-  tested end-to-end**, because a failed test would strand the box; panic on
-  oops / hard lockup + reboot after 10 s; journald syncing every 30 s (with the
-  5-min default the last minutes before the freeze were lost from the log).
+- Now in place: `processor.max_cstate=1` plus `zen-c6-disable.service`
+  (prevention); the `sp5100_tco` hardware watchdog driven by systemd
+  (`RuntimeWatchdogSec=30s`); panic on oops / hard lockup + reboot after 10 s;
+  journald syncing every 30 s (with the 5-min default the last minutes before
+  the freeze were lost from the log).
+- **`max_cstate=1` alone did not prevent it**: three more idle freezes on
+  2026-10-10/11 with it active. It only hides ACPI C2 from the OS; the SMU
+  still used core CC6 / package PC6 (enable bits read set on the box). So
+  `zen-c6-disable` clears them via MSR on every boot (`0xC0010292` bit 32,
+  `0xC0010296` bits 6/14/22, as `zenstates.py --c6-disable`). Verify:
+  `rdmsr -a 0xC0010292` → `52`, `rdmsr -a 0xC0010296` → `80808`
+  (`nix-shell -p msr-tools`).
+- **The watchdog works** (proven 2026-10-09..11): three freezes were reset
+  automatically, the next boot following ~110 s after the last log line.
+  **But the firmware can still strand it**: after the 4th reset in a row
+  (10-11 14:08) the board stopped in BIOS setup with a "boot failure" message
+  and sat there until 10-20 — that is the **~69 W "hung"** reading. 69 W =
+  sitting in BIOS, 82 W = frozen OS. Only someone at the box clears it.
 - **Diagnosing the next one**: `journalctl --list-boots`; a boot whose last
   lines are *not* the `systemd-shutdown` sequence ended abruptly. Read it with
   `journalctl -b -1 --since "YYYY-MM-DD HH:MM"` — a bare `--since HH:MM` means
   *today*. A watchdog-triggered reset shows up as a new boot after the gap.
+  The summarize sweep logs every minute, so the freeze is within ~1 min of the
+  last journal line. `/sys/fs/pstore` (efi_pstore) has stayed empty so far —
+  no panic text survived, consistent with a hard freeze rather than a panic.
 - Opening `/dev/watchdog0` (e.g. `wdctl`) can arm the timer; `wdctl` disarms it
   again on exit (magic close), so reading is safe — but don't hold the device
   open from scripts while systemd owns it.

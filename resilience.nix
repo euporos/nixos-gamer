@@ -18,6 +18,16 @@
 #    measure on the Shelly plug if it matters. Remove once the BIOS is updated
 #    and "Typical Current Idle" is set.
 #
+#    max_cstate=1 alone was NOT enough: with it active the box still froze
+#    idle three times in 28 h (2026-10-10 21:00, 10-11 00:09, 10-11 14:08).
+#    It only hides the ACPI C2 state from the OS; the SMU still drops cores
+#    into CC6 and the package into PC6 on its own, and those enables stayed
+#    set (read on the box: 0xC0010292 = 0x100000052, 0xC0010296 = 0x484848).
+#    zen-c6-disable clears them via MSR at boot — the same bits as
+#    `zenstates.py --c6-disable`: package C6 = 0xC0010292 bit 32, core C6 =
+#    0xC0010296 bits 6/14/22. MSR state does not survive a reset, hence a
+#    boot-time service rather than a one-off.
+#
 # 2. RECOVER from a hard lockup: the AMD FCH hardware watchdog (sp5100_tco,
 #    /dev/watchdog0, auto-loaded). systemd pets it every RuntimeWatchdogSec/2;
 #    if the kernel freezes, nobody pets it and the chipset resets the board.
@@ -36,7 +46,31 @@
 #    (2026-10-08: the log ended ~1-5 min before the actual freeze). 30 s keeps
 #    the gap small; the extra NVMe writes are negligible.
 {
-  boot.kernelParams = [ "processor.max_cstate=1" ];
+  # msr.allow_writes=on: the kernel otherwise warns on every write to these
+  # (to it) unknown AMD MSRs.
+  boot.kernelParams = [ "processor.max_cstate=1" "msr.allow_writes=on" ];
+  boot.kernelModules = [ "msr" ];
+
+  systemd.services.zen-c6-disable = {
+    description = "Disable Zen 1 core and package C6 (idle-freeze erratum)";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "systemd-modules-load.service" ];
+    path = [ pkgs.msr-tools ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      for dev in /dev/cpu/[0-9]*; do
+        cpu=''${dev##*/}
+        pc6=$(( 16#$(rdmsr -p "$cpu" 0xC0010292) ))
+        cc6=$(( 16#$(rdmsr -p "$cpu" 0xC0010296) ))
+        wrmsr -p "$cpu" 0xC0010292 $(( pc6 & ~(1 << 32) ))
+        wrmsr -p "$cpu" 0xC0010296 $(( cc6 & ~((1 << 22) | (1 << 14) | (1 << 6)) ))
+      done
+      echo "C6 off: 0xC0010292=$(rdmsr -p 0 0xC0010292) 0xC0010296=$(rdmsr -p 0 0xC0010296)"
+    '';
+  };
 
   systemd.settings.Manager = {
     RuntimeWatchdogSec = "30s";
