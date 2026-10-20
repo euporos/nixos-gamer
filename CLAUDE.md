@@ -100,18 +100,21 @@ a **Gigabyte AX370-Gaming 5 on BIOS F8 (2017)**, older than the AGESA fix.
   plug it **stayed at 2 W**: the firmware doesn't power on after AC loss, and
   the RTL8125B NIC doesn't answer WoL after a full AC loss either (r8169 arms
   WoL at each OS boot; AC loss resets it). Recovery took someone pressing the
-  power button. Pending, needs someone at the box: BIOS **"Restore on AC Power
-  Loss" → Power On** (then the Shelly is a remote power button from any state);
-  ideally a BIOS update + "Power Supply Idle Control: Typical Current Idle",
+  power button. **Since 2026-10-20 the BIOS has Power → "AC BACK" = Always On**,
+  so the Shelly is a remote power button from any state (off, frozen, stranded
+  in BIOS setup): relay off → wait ~10 s → on boots the box. euporious
+  (`/gamer`, `euporious.gamer` on the NAS) uses this: it reads < 4 W as off,
+  powers on via the relay, and has a guarded "Power cycle" action. Still
+  pending: a BIOS update + "Power Supply Idle Control: Typical Current Idle",
   after which `processor.max_cstate=1` can go.
 - **The box's smart plug is the Shelly Plug S (Gen1) at `192.168.85.203`**
   (no auth, unnamed; `.201` is a second Shelly, *not* the box). Read-only
   state: `curl -s http://192.168.85.203/status | jq '.relays[0].ison,
   .meters[0]'` (`counters` = last 3 minutes in watt-minutes). Reference draw:
-  ~2 W off, **82 W** frozen (2026-10-08), **~69 W** hung and unreachable
-  (2026-10-12, cause unknown). Relay: `/relay/0?turn=off|on` — but see above:
-  until the BIOS AC-loss setting is changed, switching it off leaves the box
-  off for good.
+  ~2 W off, ~75-80 W idle in NixOS, **82 W** frozen (2026-10-08), **~69 W**
+  hung and unreachable (2026-10-12, sitting in BIOS setup). Relay:
+  `/relay/0?turn=off|on` — a hard reset; with AC BACK = Always On the box comes
+  back up after it.
 - Now in place: `processor.max_cstate=1` plus `zen-c6-disable.service`
   (prevention); the `sp5100_tco` hardware watchdog driven by systemd
   (`RuntimeWatchdogSec=30s`); panic on oops / hard lockup + reboot after 10 s;
