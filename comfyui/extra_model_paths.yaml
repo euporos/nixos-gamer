@@ -1,0 +1,6 @@
+# Custom nodes baked into the image (pinned in the Containerfile). The
+# persistent /data/custom_nodes stays first in the search list, so that is
+# where ComfyUI-Manager installs.
+baked:
+  base_path: /opt/comfyui-nodes
+  custom_nodes: .

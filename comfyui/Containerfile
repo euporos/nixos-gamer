@@ -1,0 +1,77 @@
+# ComfyUI for the GTX 1080 Ti (Pascal, sm_61). Built on the box by
+# comfyui.nix (podman build, tagged by the hash of this directory), never
+# pulled — every version below is pinned so a rebuild yields the same stack.
+#
+# TORCH PIN — the one thing that must not float. PyTorch's cu128/cu129/cu130
+# wheels ship no sm_5x/sm_6x kernels ("no kernel image is available" on this
+# card). The cu126 wheels still carry sm_60, which runs on sm_61 — verified on
+# the box for 2.8.0, 2.10.0 and 2.14.1. So: torch from the cu126 index, pinned
+# with its +cu126 local version, and enforced at RUNTIME too via PIP_CONSTRAINT
+# (see the bottom), so ComfyUI-Manager installing a custom node's requirements
+# can never swap it for a PyPI (cu128+) build.
+FROM docker.io/library/python:3.12-slim-bookworm@sha256:57d96f71de145a98e7ceca18ee4ade77bba4103a33a72dfaea026b23625c6bf0
+
+# git: ComfyUI-Manager clones custom nodes.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV PIP_ROOT_USER_ACTION=ignore PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+
+COPY torch-pins.txt requirements.lock /etc/comfyui/
+
+RUN pip install --index-url https://download.pytorch.org/whl/cu126 \
+      -c /etc/comfyui/torch-pins.txt torch torchvision
+
+# ComfyUI v0.42.1. The .git dir is dropped on purpose: without it Manager's
+# "Update ComfyUI" cannot git-pull the code out from under the pins — bump the
+# tag/rev here instead.
+ARG COMFYUI_TAG=v0.42.1
+ARG COMFYUI_REV=63be2f9b82ad0dac88a7ceaa28a9cf3154125a18
+RUN git clone --depth 1 --branch "$COMFYUI_TAG" https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+ && test "$(git -C /opt/ComfyUI rev-parse HEAD)" = "$COMFYUI_REV" \
+ && rm -rf /opt/ComfyUI/.git
+
+# Baked custom nodes live outside the persistent custom_nodes dir (that one is
+# Manager's), added via extra_model_paths.yaml. ComfyUI-GGUF has no releases;
+# pinned by commit.
+ARG GGUF_REV=6ea2651e7df66d7585f6ffee804b20e92fb38b8a
+RUN git clone https://github.com/city96/ComfyUI-GGUF.git /opt/comfyui-nodes/ComfyUI-GGUF \
+ && git -C /opt/comfyui-nodes/ComfyUI-GGUF checkout -q "$GGUF_REV" \
+ && rm -rf /opt/comfyui-nodes/ComfyUI-GGUF/.git
+
+# requirements.lock is a full `pip freeze` of a known-good build, used as a
+# constraint so every transitive dependency resolves to the same version.
+# manager_requirements.txt pins comfyui_manager itself (the pip-packaged
+# Manager v4, enabled with --enable-manager).
+RUN pip install -c /etc/comfyui/torch-pins.txt -c /etc/comfyui/requirements.lock \
+      -r /opt/ComfyUI/requirements.txt \
+      -r /opt/ComfyUI/manager_requirements.txt \
+      -r /opt/comfyui-nodes/ComfyUI-GGUF/requirements.txt
+
+COPY gpu_lock /opt/comfyui-nodes/gpu_lock
+COPY extra_model_paths.yaml pip.conf /etc/comfyui/
+
+# Runtime: anything pip installs later (Manager -> custom node requirements)
+# goes to the persistent user site under /data, never into the image, and is
+# constrained to the torch pins — see pip.conf for why that is a config file
+# rather than PIP_USER/PIP_CONSTRAINT. UV_CONSTRAINT covers Manager's optional
+# uv mode (off by default).
+# TORCH_DISABLE_NATIVE_JIT: torch >= 2.12 reroutes some eager CUDA ops through
+# its torch._native registry to Triton kernels (e.g. the bmm outer product in
+# the Qwen3/llama rotary embedding -> every Z-Image prompt). Triton needs
+# compute capability >= 7.0 (and a C compiler at runtime); on Pascal it dies
+# with "Failed to find C compiler". Disabling the registry falls back to the
+# stock aten CUDA kernels, which do run on sm_61.
+ENV TORCH_DISABLE_NATIVE_JIT=1 \
+    PIP_CONFIG_FILE=/etc/comfyui/pip.conf \
+    UV_CONSTRAINT=/etc/comfyui/torch-pins.txt \
+    PYTHONUSERBASE=/data/.local \
+    HOME=/data/home \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /opt/ComfyUI
+EXPOSE 8188
+ENTRYPOINT ["python", "/opt/ComfyUI/main.py", "--base-directory", "/data", \
+            "--extra-model-paths-config", "/etc/comfyui/extra_model_paths.yaml", \
+            "--enable-manager"]
