@@ -49,6 +49,21 @@ RUN pip install -c /etc/comfyui/torch-pins.txt -c /etc/comfyui/requirements.lock
       -r /opt/ComfyUI/manager_requirements.txt \
       -r /opt/comfyui-nodes/ComfyUI-GGUF/requirements.txt
 
+# Ultimate SD Upscale (tiled img2img refine for print-size upscales), pinned by
+# commit; it needs nothing beyond ComfyUI's own deps. Its core is Coyote-A's
+# A1111 script, vendored as a git submodule. With that dir empty the node
+# downloads upstream master at import time (unpinned, and /opt is read-only at
+# runtime), so the submodule is checked out and verified here. Placed after the
+# pip layers so adding/bumping it doesn't rebuild those.
+ARG USDU_REV=a5547db9e1d07d3318bb21e9e9c474f4c1e9c8df
+ARG USDU_SCRIPT_REV=2322caa480535b1011a1f9c18126d85ea444f146
+RUN git clone -q https://github.com/ssitu/ComfyUI_UltimateSDUpscale.git /opt/comfyui-nodes/ComfyUI_UltimateSDUpscale \
+ && git -C /opt/comfyui-nodes/ComfyUI_UltimateSDUpscale checkout -q "$USDU_REV" \
+ && git -C /opt/comfyui-nodes/ComfyUI_UltimateSDUpscale submodule update --init -q \
+ && test "$(git -C /opt/comfyui-nodes/ComfyUI_UltimateSDUpscale/repositories/ultimate_sd_upscale rev-parse HEAD)" = "$USDU_SCRIPT_REV" \
+ && rm -rf /opt/comfyui-nodes/ComfyUI_UltimateSDUpscale/.git \
+           /opt/comfyui-nodes/ComfyUI_UltimateSDUpscale/repositories/ultimate_sd_upscale/.git
+
 COPY gpu_lock /opt/comfyui-nodes/gpu_lock
 COPY extra_model_paths.yaml pip.conf /etc/comfyui/
 

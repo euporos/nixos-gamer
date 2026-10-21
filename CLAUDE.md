@@ -579,7 +579,23 @@ models, LoRAs, the torch pin, timings) are in README.md. Non-obvious facts:
   `ae.safetensors` comes from Comfy-Org's Z-Image repackage (BFL's own copy is
   gated). Z-Image uses the FLUX.1 autoencoder, and it decodes FLUX.1-dev
   correctly (verified by output). `comfyui-models` trusts any existing file (no re-hash) —
-  delete one to force a re-download.
+  delete one to force a re-download. A model entry may give `url` instead of
+  `repo`/`rev`/`path` (Real-ESRGAN comes from xinntao's GitHub release); the
+  HF token is sent to `huggingface.co` URLs only.
+- **Upscaling (Ultimate SD Upscale, `USDU_REV`)**: its core is a git
+  submodule. If that dir is empty, the node downloads upstream *master* at
+  import time (unpinned, and `/opt` is read-only at runtime), so the
+  Containerfile checks out the submodule and verifies `USDU_SCRIPT_REV`. In
+  ComfyUI, `steps` at low denoise still runs *all* steps (sigmas for
+  steps/denoise, last `steps` taken), so each tile costs full steps: the
+  defaults are 10 / 4 / 6 (SDXL / Z-Image / Flux), and 20 SDXL steps took
+  338 s for 4 tiles.
+- **Editing workflow JSON by hand/script**: the frontend adds a
+  `control_after_generate` value after *any* INT input named `seed`, even
+  when `object_info` doesn't flag it (USDU doesn't). Leaving it out
+  silently shifts every later widget value by one. Check with
+  `app.graphToPrompt()` in the browser. API-format prompts can read
+  generated files directly: `LoadImage` accepts `"name.png [output]"`.
 
 ## Interactive LLM endpoint (`local-llm.nix`)
 

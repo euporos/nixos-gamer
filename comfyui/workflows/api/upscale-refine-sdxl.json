@@ -1,0 +1,9 @@
+{
+  "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"}},
+  "2": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["1", 1], "text": "a red fox sitting in a snowy pine forest, highly detailed, sharp focus, fine texture, high quality"}},
+  "3": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["1", 1], "text": "blurry, lowres, deformed, watermark, text, jpeg artifacts"}},
+  "4": {"class_type": "LoadImage", "inputs": {"image": "example.png"}},
+  "5": {"class_type": "UpscaleModelLoader", "inputs": {"model_name": "4x-UltraSharp.safetensors"}},
+  "6": {"class_type": "UltimateSDUpscale", "inputs": {"image": ["4", 0], "model": ["1", 0], "positive": ["2", 0], "negative": ["3", 0], "vae": ["1", 2], "upscale_model": ["5", 0], "upscale_by": 2.0, "seed": 42, "steps": 10, "cfg": 5.0, "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 0.25, "mode_type": "Linear", "tile_width": 1024, "tile_height": 1024, "mask_blur": 16, "tile_padding": 64, "seam_fix_mode": "None", "seam_fix_denoise": 1.0, "seam_fix_width": 64, "seam_fix_mask_blur": 8, "seam_fix_padding": 16, "force_uniform_tiles": true, "tiled_decode": false, "batch_size": 1}},
+  "7": {"class_type": "SaveImage", "inputs": {"images": ["6", 0], "filename_prefix": "upscaled/refine-sdxl"}}
+}

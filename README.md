@@ -59,8 +59,9 @@ the box as root: `echo 'HF_TOKEN=hf_...' > /var/lib/whisper/hf-token.env`.
 ComfyUI v0.42.1 on the 1080 Ti, LAN-only at **http://192.168.85.30:8188/**
 (firewalled to `192.168.85.0/24`; no auth). It runs as the `comfyui` systemd
 service: a podman container built on the box from `comfyui/Containerfile`,
-with all state in `/var/lib/comfyui`. Includes ComfyUI-GGUF and
-ComfyUI-Manager (v4, the pip package, enabled with `--enable-manager`).
+with all state in `/var/lib/comfyui`. Includes ComfyUI-GGUF, Ultimate SD
+Upscale and ComfyUI-Manager (v4, the pip package, enabled with
+`--enable-manager`).
 
 ```sh
 systemctl status comfyui            # on the box (as root)
@@ -74,7 +75,8 @@ It starts at boot. If a pin changed, the first start rebuilds the image
 a prompt in flight is lost, but nothing else is.
 
 **Saved workflows** (Workflows sidebar): `sdxl-juggernaut`, `z-image-turbo`,
-`flux1-dev-gguf`. They are copied from `comfyui/workflows/` on every start, so
+`flux1-dev-gguf`, plus `upscale-esrgan` and `upscale-refine-sdxl` (see
+[Upscaling for print](#upscaling-for-print)). They are copied from `comfyui/workflows/` on every start, so
 **save your own edits under a new name** or they get overwritten. API-format
 copies for scripting live in `comfyui/workflows/api/`
 (`curl -X POST :8188/prompt -d '{"prompt": …}'`).
@@ -92,6 +94,47 @@ at ~32 s/step is near what the card can do. A cold first run adds 5–20 s for
 loading. ComfyUI holds the shared GPU lock for 5 minutes after the last prompt
 (models stay loaded), so a queued transcription or summary waits at most that
 long. Conversely, a prompt waits while one of those is running.
+
+### Upscaling for print
+
+Generate at the model's native size (~1 MP) and upscale only the keepers.
+For reference, A4 at 300 dpi is 3508×2480 px, so ×3.5 from 1024 px covers it.
+Results go to `output/upscaled/`. There are two kinds of upscale:
+
+- **Plain model upscale** (`upscale-esrgan`): Load Image → ESRGAN ×4 →
+  optional Scale By → Save. Takes 12–30 s for 1024² → 4096². It sharpens
+  what is there but adds no new detail, and needs no prompt, so it works on
+  any image. Models: `4x-UltraSharp` (crisp, good on generated art,
+  CC BY-NC-SA, so personal use only) and `RealESRGAN_x4plus` (BSD, softer).
+- **Refined upscale** (Ultimate SD Upscale): ESRGAN first, then every
+  1024² tile is re-diffused at low denoise (0.25–0.3) by a diffusion
+  model. This invents real fine detail (fur, skin, texture) without
+  visible seams.
+  - **Your own images:** every generation workflow has an **Upscale**
+    group, bypassed by default. Drag the keeper PNG onto the canvas
+    (restores its prompt and settings), then drop the same PNG onto the
+    group's Load Image (exact pixels, no regeneration). Click the
+    `Generate` group title and press Ctrl+B, click the `Upscale` title and
+    press Ctrl+B, then queue. The tiles use that workflow's own model and
+    prompt. PNGs made before this group existed restore without it; use
+    the standalone workflow for those.
+  - **Any other image:** `upscale-refine-sdxl` (Juggernaut). Replace
+    "describe the picture here" with a few words about the image.
+
+`steps` on the upscale node is the number of steps actually run **per tile**.
+Low denoise does not shorten it (that is how ComfyUI's sampler works), so
+time ≈ tiles × steps × s/step. The defaults are kept low for that reason.
+Measured ×2 (1024² → 2048², 4 tiles, warm):
+
+| upscale                        | steps | time    |
+| ------------------------------ | ----- | ------- |
+| `upscale-esrgan` ×4            | –     | 12–30 s |
+| SDXL group / `upscale-refine-sdxl` | 10 | ~180 s  |
+| Z-Image group                  | 4     | ~200 s  |
+| Flux group                     | 6     | ~17 min (est.: 246 s at 1 step) |
+
+Time grows with the tile count: ×3.5 (A4) is 16 tiles, so about 4× the ×2
+time (roughly 12 min with SDXL). Don't feed the refine an already-huge image.
 
 ### Models, LoRAs, custom nodes
 
@@ -118,8 +161,9 @@ long. Conversely, a prompt waits while one of those is running.
 - **Custom nodes** installed through Manager land in
   `/var/lib/comfyui/custom_nodes/`, their Python deps in
   `/var/lib/comfyui/.local/`. Both persist across restarts and image rebuilds.
-  ComfyUI-GGUF is baked into the image (`/opt/comfyui-nodes`), so update it by
-  bumping `GGUF_REV` in the Containerfile, not through Manager.
+  ComfyUI-GGUF and Ultimate SD Upscale are baked into the image
+  (`/opt/comfyui-nodes`). Update them by bumping `GGUF_REV` / `USDU_REV` (and
+  `USDU_SCRIPT_REV`) in the Containerfile, not through Manager.
 
 ### The torch pin — read before updating anything
 

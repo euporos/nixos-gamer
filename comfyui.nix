@@ -53,8 +53,9 @@ let
   image = "localhost/comfyui:${tag}";
 
   # Models: { dir (under models/), file, HF repo, pinned revision, path in repo,
-  # sha256 }. Ungated repos only — no token needed. If a gated repo is ever
-  # added, the fetcher already sends the sops `hf-token` when it decrypts.
+  # sha256 }, or { dir, file, url, sha256 } for a file whose canonical home is
+  # not HF. Ungated repos only — no token needed. If a gated repo is ever
+  # added, the fetcher already sends the sops `hf-token` (to HF URLs only).
   models = [
     # SDXL workhorse — Juggernaut XL v9 (photoreal SDXL fine-tune), includes VAE.
     { dir = "checkpoints"; file = "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors";
@@ -98,10 +99,24 @@ let
       repo = "city96/t5-v1_1-xxl-encoder-gguf"; rev = "005a6ea51a7d0b84d677b3e633bb52a8c85a83d9";
       path = "t5-v1_1-xxl-encoder-Q8_0.gguf";
       sha256 = "9ec60f6028534b7fe5af439fcb535d75a68592a9ca3fcdeb175ef89e3ee99825"; }
+
+    # Upscalers (ESRGAN family, loaded by spandrel), ~64 MB each.
+    # Real-ESRGAN: BSD, general-purpose, from xinntao's own release (the HF
+    # copies are third-party mirrors). Loaded weights-only, so the .pth
+    # pickle is not executed.
+    { dir = "upscale_models"; file = "RealESRGAN_x4plus.pth";
+      url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth";
+      sha256 = "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1"; }
+    # 4x-UltraSharp: crisper on generated images; CC BY-NC-SA 4.0 (personal
+    # use). From the author's own repo.
+    { dir = "upscale_models"; file = "4x-UltraSharp.safetensors";
+      repo = "Kim2091/UltraSharp"; rev = "920fe218c211f831b43cb30327f203e2b59f5dab";
+      path = "4x-UltraSharp.safetensors";
+      sha256 = "36a340b5509b699d2c06cb445ddc1d3d39199ac734d889ed6d7915f60e05bcbc"; }
   ];
 
   manifest = pkgs.writeText "comfyui-models.txt" (lib.concatMapStrings (m:
-    "${m.dir} ${m.file} https://huggingface.co/${m.repo}/resolve/${m.rev}/${m.path} ${m.sha256}\n"
+    "${m.dir} ${m.file} ${m.url or "https://huggingface.co/${m.repo}/resolve/${m.rev}/${m.path}"} ${m.sha256}\n"
   ) models);
 
   # Idempotent: a file that exists is trusted (hashing ~50 GB on every boot is
@@ -123,7 +138,10 @@ let
         [ -e "$dest" ] && continue
         install -d -o ${toString uid} -g ${toString uid} "$(dirname "$dest")"
         echo "fetching $dir/$file"
-        if ! curl -fsSL --retry 5 --retry-delay 10 -C - "''${auth[@]}" -o "$dest.part" "$url"; then
+        # The token is for HF; never hand it to another host.
+        hdr=()
+        [[ $url == https://huggingface.co/* ]] && hdr=("''${auth[@]}")
+        if ! curl -fsSL --retry 5 --retry-delay 10 -C - "''${hdr[@]}" -o "$dest.part" "$url"; then
           echo "FAILED: $dir/$file (gated repo? check the hf-token secret)" >&2; rc=1; continue
         fi
         if [ "$(sha256sum "$dest.part" | cut -d' ' -f1)" != "$sha" ]; then

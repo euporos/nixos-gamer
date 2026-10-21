@@ -1,7 +1,7 @@
 {
  "revision": 0,
- "last_node_id": 10,
- "last_link_id": 10,
+ "last_node_id": 15,
+ "last_link_id": 17,
  "nodes": [
   {
    "id": 1,
@@ -34,7 +34,8 @@
      "name": "MODEL",
      "type": "MODEL",
      "links": [
-      4
+      4,
+      12
      ]
     }
    ],
@@ -146,7 +147,8 @@
      "name": "VAE",
      "type": "VAE",
      "links": [
-      9
+      9,
+      15
      ]
     }
    ],
@@ -249,7 +251,8 @@
      "name": "CONDITIONING",
      "type": "CONDITIONING",
      "links": [
-      5
+      5,
+      13
      ]
     }
    ],
@@ -291,7 +294,8 @@
      "name": "CONDITIONING",
      "type": "CONDITIONING",
      "links": [
-      6
+      6,
+      14
      ]
     }
    ],
@@ -580,6 +584,433 @@
    "widgets_values_named": {
     "filename_prefix": "flux1-dev"
    }
+  },
+  {
+   "id": 11,
+   "type": "Note",
+   "pos": [
+    100,
+    988
+   ],
+   "size": [
+    420,
+    420
+   ],
+   "flags": {},
+   "order": 10,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [],
+   "properties": {},
+   "widgets_values": [
+    "UPSCALE A KEEPER\n\n1. Drag the generated PNG onto the canvas: this restores its prompt and settings.\n2. Drag the same PNG onto the Load Image node below (exact pixels, no regeneration).\n3. Click the 'Generate' group title, Ctrl+B (bypass it); click the 'Upscale' group title, Ctrl+B (enable it). Queue.\n\nupscale_by 2 = 2048 px. For A4 at 300 dpi use ~3.5 (3584 px). Each tile is re-diffused at low denoise with this workflow's own model and prompt, so it adds real detail. Output: output/upscaled/.\nsteps = steps actually run PER TILE (low denoise does not shorten them), so time ~ tiles x steps x s/step: keep steps low.\nOlder PNGs (made before this group existed) restore without it: use the upscale-refine-sdxl workflow instead."
+   ]
+  },
+  {
+   "id": 12,
+   "type": "LoadImage",
+   "pos": [
+    580,
+    988
+   ],
+   "size": [
+    320,
+    360
+   ],
+   "flags": {},
+   "order": 11,
+   "mode": 4,
+   "inputs": [
+    {
+     "localized_name": "image",
+     "name": "image",
+     "type": "COMBO",
+     "link": null,
+     "widget": {
+      "name": "image"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "IMAGE",
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      11
+     ]
+    },
+    {
+     "localized_name": "MASK",
+     "name": "MASK",
+     "type": "MASK",
+     "links": null
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "LoadImage"
+   },
+   "widgets_values": [
+    "example.png",
+    "image"
+   ]
+  },
+  {
+   "id": 13,
+   "type": "UpscaleModelLoader",
+   "pos": [
+    580,
+    1388
+   ],
+   "size": [
+    320,
+    60
+   ],
+   "flags": {},
+   "order": 12,
+   "mode": 4,
+   "inputs": [
+    {
+     "localized_name": "model_name",
+     "name": "model_name",
+     "type": "COMBO",
+     "link": null,
+     "widget": {
+      "name": "model_name"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "UPSCALE_MODEL",
+     "name": "UPSCALE_MODEL",
+     "type": "UPSCALE_MODEL",
+     "links": [
+      16
+     ]
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "UpscaleModelLoader"
+   },
+   "widgets_values": [
+    "4x-UltraSharp.safetensors"
+   ]
+  },
+  {
+   "id": 14,
+   "type": "UltimateSDUpscale",
+   "pos": [
+    960,
+    988
+   ],
+   "size": [
+    320,
+    620
+   ],
+   "flags": {},
+   "order": 13,
+   "mode": 4,
+   "inputs": [
+    {
+     "localized_name": "image",
+     "name": "image",
+     "type": "IMAGE",
+     "link": 11
+    },
+    {
+     "localized_name": "model",
+     "name": "model",
+     "type": "MODEL",
+     "link": 12
+    },
+    {
+     "localized_name": "positive",
+     "name": "positive",
+     "type": "CONDITIONING",
+     "link": 13
+    },
+    {
+     "localized_name": "negative",
+     "name": "negative",
+     "type": "CONDITIONING",
+     "link": 14
+    },
+    {
+     "localized_name": "vae",
+     "name": "vae",
+     "type": "VAE",
+     "link": 15
+    },
+    {
+     "localized_name": "upscale_by",
+     "name": "upscale_by",
+     "type": "FLOAT",
+     "link": null,
+     "widget": {
+      "name": "upscale_by"
+     }
+    },
+    {
+     "localized_name": "seed",
+     "name": "seed",
+     "type": "INT",
+     "link": null,
+     "widget": {
+      "name": "seed"
+     }
+    },
+    {
+     "localized_name": "steps",
+     "name": "steps",
+     "type": "INT",
+     "link": null,
+     "widget": {
+      "name": "steps"
+     }
+    },
+    {
+     "localized_name": "cfg",
+     "name": "cfg",
+     "type": "FLOAT",
+     "link": null,
+     "widget": {
+      "name": "cfg"
+     }
+    },
+    {
+     "localized_name": "sampler_name",
+     "name": "sampler_name",
+     "type": "COMBO",
+     "link": null,
+     "widget": {
+      "name": "sampler_name"
+     }
+    },
+    {
+     "localized_name": "scheduler",
+     "name": "scheduler",
+     "type": "COMBO",
+     "link": null,
+     "widget": {
+      "name": "scheduler"
+     }
+    },
+    {
+     "localized_name": "denoise",
+     "name": "denoise",
+     "type": "FLOAT",
+     "link": null,
+     "widget": {
+      "name": "denoise"
+     }
+    },
+    {
+     "localized_name": "upscale_model",
+     "name": "upscale_model",
+     "type": "UPSCALE_MODEL",
+     "link": 16
+    },
+    {
+     "localized_name": "mode_type",
+     "name": "mode_type",
+     "type": "COMBO",
+     "link": null,
+     "widget": {
+      "name": "mode_type"
+     }
+    },
+    {
+     "localized_name": "tile_width",
+     "name": "tile_width",
+     "type": "INT",
+     "link": null,
+     "widget": {
+      "name": "tile_width"
+     }
+    },
+    {
+     "localized_name": "tile_height",
+     "name": "tile_height",
+     "type": "INT",
+     "link": null,
+     "widget": {
+      "name": "tile_height"
+     }
+    },
+    {
+     "localized_name": "mask_blur",
+     "name": "mask_blur",
+     "type": "INT",
+     "link": null,
+     "widget": {
+      "name": "mask_blur"
+     }
+    },
+    {
+     "localized_name": "tile_padding",
+     "name": "tile_padding",
+     "type": "INT",
+     "link": null,
+     "widget": {
+      "name": "tile_padding"
+     }
+    },
+    {
+     "localized_name": "seam_fix_mode",
+     "name": "seam_fix_mode",
+     "type": "COMBO",
+     "link": null,
+     "widget": {
+      "name": "seam_fix_mode"
+     }
+    },
+    {
+     "localized_name": "seam_fix_denoise",
+     "name": "seam_fix_denoise",
+     "type": "FLOAT",
+     "link": null,
+     "widget": {
+      "name": "seam_fix_denoise"
+     }
+    },
+    {
+     "localized_name": "seam_fix_width",
+     "name": "seam_fix_width",
+     "type": "INT",
+     "link": null,
+     "widget": {
+      "name": "seam_fix_width"
+     }
+    },
+    {
+     "localized_name": "seam_fix_mask_blur",
+     "name": "seam_fix_mask_blur",
+     "type": "INT",
+     "link": null,
+     "widget": {
+      "name": "seam_fix_mask_blur"
+     }
+    },
+    {
+     "localized_name": "seam_fix_padding",
+     "name": "seam_fix_padding",
+     "type": "INT",
+     "link": null,
+     "widget": {
+      "name": "seam_fix_padding"
+     }
+    },
+    {
+     "localized_name": "force_uniform_tiles",
+     "name": "force_uniform_tiles",
+     "type": "BOOLEAN",
+     "link": null,
+     "widget": {
+      "name": "force_uniform_tiles"
+     }
+    },
+    {
+     "localized_name": "tiled_decode",
+     "name": "tiled_decode",
+     "type": "BOOLEAN",
+     "link": null,
+     "widget": {
+      "name": "tiled_decode"
+     }
+    },
+    {
+     "localized_name": "batch_size",
+     "name": "batch_size",
+     "type": "INT",
+     "link": null,
+     "widget": {
+      "name": "batch_size"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "IMAGE",
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      17
+     ]
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "UltimateSDUpscale"
+   },
+   "widgets_values": [
+    2.0,
+    42,
+    "fixed",
+    6,
+    1.0,
+    "euler",
+    "simple",
+    0.25,
+    "Linear",
+    1024,
+    1024,
+    16,
+    64,
+    "None",
+    1.0,
+    64,
+    8,
+    16,
+    true,
+    false,
+    1
+   ]
+  },
+  {
+   "id": 15,
+   "type": "SaveImage",
+   "pos": [
+    1340,
+    988
+   ],
+   "size": [
+    420,
+    460
+   ],
+   "flags": {},
+   "order": 14,
+   "mode": 4,
+   "inputs": [
+    {
+     "localized_name": "images",
+     "name": "images",
+     "type": "IMAGE",
+     "link": 17
+    },
+    {
+     "localized_name": "filename_prefix",
+     "name": "filename_prefix",
+     "type": "STRING",
+     "link": null,
+     "widget": {
+      "name": "filename_prefix"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "images",
+     "name": "images",
+     "type": "IMAGE",
+     "links": null
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SaveImage"
+   },
+   "widgets_values": [
+    "upscaled/flux1-dev-gguf"
+   ]
   }
  ],
  "links": [
@@ -662,9 +1093,92 @@
    10,
    0,
    "IMAGE"
+  ],
+  [
+   11,
+   12,
+   0,
+   14,
+   0,
+   "IMAGE"
+  ],
+  [
+   12,
+   1,
+   0,
+   14,
+   1,
+   "MODEL"
+  ],
+  [
+   13,
+   5,
+   0,
+   14,
+   2,
+   "CONDITIONING"
+  ],
+  [
+   14,
+   6,
+   0,
+   14,
+   3,
+   "CONDITIONING"
+  ],
+  [
+   15,
+   3,
+   0,
+   14,
+   4,
+   "VAE"
+  ],
+  [
+   16,
+   13,
+   0,
+   14,
+   12,
+   "UPSCALE_MODEL"
+  ],
+  [
+   17,
+   14,
+   0,
+   15,
+   0,
+   "IMAGE"
   ]
  ],
- "groups": [],
+ "groups": [
+  {
+   "id": 1,
+   "title": "Generate",
+   "bounding": [
+    1310,
+    60,
+    940,
+    380
+   ],
+   "color": "#3f789e",
+   "font_size": 24,
+   "flags": {}
+  },
+  {
+   "id": 2,
+   "title": "Upscale (bypassed: see note)",
+   "bounding": [
+    550,
+    918,
+    1240,
+    760
+   ],
+   "color": "#8A8A3F",
+   "font_size": 24,
+   "flags": {}
+  }
+ ],
  "config": {},
  "extra": {
   "ds": {
