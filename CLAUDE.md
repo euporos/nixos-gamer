@@ -23,10 +23,20 @@ from a machine without that alias needs it added first.
 - **GPU is a GTX 1080 Ti (Pascal, sm_61).** Consequences:
   - NVIDIA driver must stay on `nvidiaPackages.legacy_580` — the last branch
     with Pascal support (`production` ≥ 590 dropped it). See `nvidia.nix`.
-  - PyTorch ≥ 2.8 CUDA wheels have **no sm_61 kernels** — anything torch-based
-    must use torch ≤ 2.7.x or it dies with "no kernel image is available".
-    This is why the WhisperX container image in `whisper.nix` is pinned to a
-    2024 build (torch 2.1.1). Do not bump it to a floating tag.
+  - PyTorch's **cu128/cu129/cu130** wheels (the PyPI default since 2.8) have
+    **no sm_5x/sm_6x kernels** — they die with "no kernel image is available".
+    The trap is the wheel *flavour*, not the torch version: the **cu126**
+    wheels still ship `sm_60` (binary-compatible with sm_61) — verified on
+    the box 2026-10-21 for 2.8.0, 2.10.0 and 2.14.1 (matmul + fp16 run). So
+    pin `torch==X+cu126` from `download.pytorch.org/whl/cu126`. The WhisperX
+    image in `whisper.nix` is still pinned to a 2024 build (torch 2.1.1)
+    because its newer builds ship a torch without Pascal kernels. Do not
+    bump it to a floating tag.
+  - **Triton needs sm_70+**, and torch ≥ ~2.12 routes some *eager* ops through
+    Triton (`torch._native` registry). On Pascal that fails with "Failed to
+    find C compiler" (misleading: a compiler wouldn't help). Set
+    `TORCH_DISABLE_NATIVE_JIT=1` for any modern torch on this box; the
+    ComfyUI image does.
   - No usable fp16 on Pascal; CTranslate2/faster-whisper runs `int8` (dp4a).
   - **Ollama (summarization) has the same sm_61 trap** — but a different fix.
     This nixpkgs' default `cudaCapabilities` is `7.5 8.0 … 12.1` (it OMITS
@@ -529,6 +539,47 @@ like transcripts.
   `navigator.clipboard` is undefined; `copyText()` falls back to a hidden
   textarea + `execCommand('copy')` (verified working over http). Don't "clean
   up" that fallback.
+
+## Image generation (`comfyui.nix`, `comfyui/`)
+
+ComfyUI at `http://192.168.85.30:8188/`, LAN-only. User docs (start/stop,
+models, LoRAs, the torch pin, timings) are in README.md. Non-obvious facts:
+
+- **Image built on the box** by the unit itself (`comfyui-launch`): `podman
+  build` of `./comfyui` minus `workflows/`, tagged with that store path's
+  hash. Any pin change gives a new tag, so the first start after a deploy
+  rebuilds (6–15 min, PyPI ~30 MB/s, slower while the model fetch competes)
+  and removes superseded tags. `Type=exec`, so the build never blocks
+  `nixos-rebuild switch`.
+- **`--network host`, not `-p`**: podman's port publishing DNATs via FORWARD
+  and bypasses the NixOS INPUT firewall. LAN-only is enforced by an iptables
+  rule with `-s 192.168.85.0/24` in `networking.firewall.extraCommands`.
+  Don't move the port to `allowedTCPPorts` (that opens it to every source).
+- **GPU lock**: `comfyui/gpu_lock` (a no-node "custom node") wraps
+  `execution.PromptExecutor.execute` (v0.42.1 internals, so re-check on a
+  ComfyUI bump) and takes `/run/whisper-gpu.lock` blocking per prompt. It keeps
+  lock + models for 300 s, then `unload_all_models()` + empty cache, and only
+  then releases. Idle CUDA context ~140 MB (box total 175 MiB). The lock gid
+  (`whisper`, 991) is not fixed and is looked up at launch.
+- **pip policy is a config file, not env vars**: `PIP_USER=1` also makes
+  `pip list` show only the user site. Manager reads `pip list`, concluded
+  torch was missing, and started "fixing" packages. `pip.conf`'s `[install]`
+  section scopes `user=true` + the torch constraint to installs only.
+  `[ComfyUI-Manager] PyTorch is not installed` at startup is still printed
+  (that check wants torchaudio) and is harmless.
+- **Benchmarks (2026-10-21, 1024², warm)**: SDXL 30 steps 98 s (3.2 s/it),
+  Z-Image Turbo bf16 8 steps ~72 s (8.6 s/it), FLUX.1-dev Q6_K 20 steps
+  ~643 s (32 s/it). All compute in fp32 (ComfyUI's Pascal default).
+  `--force-fp16` 2.5× slower; `--force-fp32` = same speed + more VRAM.
+  Z-Image bf16 safetensors (12.3 GB, DynamicVRAM-streamed) beat the Q8_0
+  GGUF (79 s); Flux Q5_K_S = Q6_K speed (compute-bound). FLUX.1-dev is
+  slow because of the card itself; there's no flag to fix it. Faster options:
+  fewer steps, a lower resolution, or a distilled model (schnell/Z-Image).
+- **Models are ungated**, so no HF token is needed. The Flux VAE
+  `ae.safetensors` comes from Comfy-Org's Z-Image repackage (BFL's own copy is
+  gated). Z-Image uses the FLUX.1 autoencoder, and it decodes FLUX.1-dev
+  correctly (verified by output). `comfyui-models` trusts any existing file (no re-hash) —
+  delete one to force a re-download.
 
 ## Interactive LLM endpoint (`local-llm.nix`)
 

@@ -26,6 +26,7 @@ on the box if the disk layout changes.
 | `configuration.nix`         | system config (users, SSH, locale, nix, packages) |
 | `nvidia.nix`                | proprietary NVIDIA driver (Pascal/`legacy_580`) + container toolkit |
 | `whisper.nix`               | German transcription pipeline (WhisperX + diarization) |
+| `comfyui.nix`, `comfyui/`   | ComfyUI image generation (podman image, models, workflows) |
 | `hardware-configuration.nix`| generated hardware scan (real UUIDs)            |
 
 ## Whisper transcription
@@ -52,6 +53,103 @@ without it the worker transcribes without speaker labels. One-time setup:
 accept the terms of `pyannote/speaker-diarization-3.1` **and**
 `pyannote/segmentation-3.0` on huggingface.co, create a read token, then on
 the box as root: `echo 'HF_TOKEN=hf_...' > /var/lib/whisper/hf-token.env`.
+
+## ComfyUI image generation
+
+ComfyUI v0.42.1 on the 1080 Ti, LAN-only at **http://192.168.85.30:8188/**
+(firewalled to `192.168.85.0/24`; no auth). It runs as the `comfyui` systemd
+service: a podman container built on the box from `comfyui/Containerfile`,
+with all state in `/var/lib/comfyui`. Includes ComfyUI-GGUF and
+ComfyUI-Manager (v4, the pip package, enabled with `--enable-manager`).
+
+```sh
+systemctl status comfyui            # on the box (as root)
+systemctl stop|start|restart comfyui
+journalctl -u comfyui -f            # also /var/lib/comfyui/user/comfyui_8188.log
+journalctl -u comfyui-models        # model downloads
+```
+
+It starts at boot. If a pin changed, the first start rebuilds the image
+(~6–15 min; the UI stays down until it finishes). Restarting is harmless:
+a prompt in flight is lost, but nothing else is.
+
+**Saved workflows** (Workflows sidebar): `sdxl-juggernaut`, `z-image-turbo`,
+`flux1-dev-gguf`. They are copied from `comfyui/workflows/` on every start, so
+**save your own edits under a new name** or they get overwritten. API-format
+copies for scripting live in `comfyui/workflows/api/`
+(`curl -X POST :8188/prompt -d '{"prompt": …}'`).
+
+Measured at 1024×1024 (warm, model already loaded):
+
+| workflow            | model                         | steps | time/image | peak VRAM |
+| ------------------- | ----------------------------- | ----- | ---------- | --------- |
+| `sdxl-juggernaut`   | Juggernaut XL v9 (SDXL)       | 30    | ~98 s      | 10.6 GB   |
+| `z-image-turbo`     | Z-Image Turbo bf16            | 8     | ~72 s      | 10.8 GB   |
+| `flux1-dev-gguf`    | FLUX.1 [dev] Q6_K + T5 Q8_0   | 20    | ~10.7 min  | 9.9 GB    |
+
+Pascal computes all of these in fp32 (it has no usable fp16), so FLUX.1 [dev]
+at ~32 s/step is near what the card can do. A cold first run adds 5–20 s for
+loading. ComfyUI holds the shared GPU lock for 5 minutes after the last prompt
+(models stay loaded), so a queued transcription or summary waits at most that
+long. Conversely, a prompt waits while one of those is running.
+
+### Models, LoRAs, custom nodes
+
+```
+/var/lib/comfyui/models/
+  checkpoints/        all-in-one SD1.5/SDXL .safetensors
+  diffusion_models/   UNet/DiT only — Flux, Z-Image, and *.gguf (UnetLoaderGGUF)
+  text_encoders/      CLIP / T5 / Qwen (*.gguf via the GGUF CLIP loaders)
+  vae/  loras/  upscale_models/   (any other ComfyUI folder works too)
+```
+
+- **Pinned, reproducible models**: add an entry to the `models` list in
+  `comfyui.nix` (HF repo, revision, file, sha256 from
+  `https://huggingface.co/api/models/<repo>/tree/<rev>`), then `nix run .#deploy`.
+  `comfyui-models.service` downloads, verifies, and renames into place. Gated
+  repos use the sops `hf-token` secret automatically, so accept the license on
+  huggingface.co first.
+- **Ad hoc**: copy files into the folder as `comfyui` (or `chown comfyui:`
+  them), then press `r` in the UI to refresh the lists. No restart needed.
+  Manager's model downloader works too.
+- **LoRAs**: drop `.safetensors` into `models/loras/` and add a `LoraLoader`
+  (SDXL) or `LoraLoaderModelOnly` (Flux/Z-Image) node after the model loader.
+  A LoRA must match the base model family.
+- **Custom nodes** installed through Manager land in
+  `/var/lib/comfyui/custom_nodes/`, their Python deps in
+  `/var/lib/comfyui/.local/`. Both persist across restarts and image rebuilds.
+  ComfyUI-GGUF is baked into the image (`/opt/comfyui-nodes`), so update it by
+  bumping `GGUF_REV` in the Containerfile, not through Manager.
+
+### The torch pin — read before updating anything
+
+The GTX 1080 Ti is Pascal (sm_61). PyTorch's **cu128/cu129/cu130 wheels contain
+no sm_5x/sm_6x kernels**: they import fine and then die with "no kernel image
+is available". The **cu126** wheels still ship sm_60 kernels, which run on
+sm_61. That holds up to torch 2.14.1 (verified on the box). So the rule is
+the *wheel flavour*, not the torch version:
+
+- `comfyui/torch-pins.txt` pins `torch==2.14.1+cu126` / `torchvision==0.29.1+cu126`.
+  The `+cu126` is the important part.
+- The same file is a **runtime pip constraint** (`comfyui/pip.conf`). If
+  Manager or a custom node's requirements try to replace torch, pip fails
+  with `ResolutionImpossible` instead of silently installing a cu128 build.
+- ComfyUI's code has its `.git` removed, so Manager's "Update ComfyUI" cannot
+  pull. Ignore it, and ignore the startup line `[ComfyUI-Manager] PyTorch is
+  not installed`. That check wants torchaudio, which ComfyUI doesn't need and
+  which has no cu126 build for torch 2.14.
+- `TORCH_DISABLE_NATIVE_JIT=1` (set in the Containerfile) is required. Newer
+  torch reroutes some ops to Triton kernels, and Triton needs sm_70+, so
+  without it the Z-Image text encoder fails ("Failed to find C compiler").
+- **To update**: bump `COMFYUI_TAG`/`COMFYUI_REV` (and/or the torch pins) in
+  the Containerfile and regenerate `requirements.lock` (build once with an
+  empty lock, then
+  `podman run --rm --entrypoint pip <image> freeze`).
+  Keep torch on a `+cu126` build. Before switching, check on the box that
+  `torch.cuda.get_arch_list()` still contains `sm_60` or `sm_61`. Deploy; the
+  next start rebuilds.
+- Don't add `--force-fp16`: Pascal's fp16 is 2.5× slower here. The default
+  (fp16/bf16 weights, fp32 compute, fp32 VAE) benchmarked fastest.
 
 ## Deploy
 
