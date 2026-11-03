@@ -33,6 +33,11 @@ in
     gh
   ];
 
+  # Same as the laptop: /bin and /usr/bin are served from PATH by envfs, so
+  # scripts with "#!/bin/bash" (the game's autogen.sh, many build helpers)
+  # run; NixOS itself provides only /bin/sh and /usr/bin/env.
+  services.envfs.enable = true;
+
   # Same as the laptop: direnv + nix-direnv so a repo's flake devShell loads
   # on cd (the 7kaa_epr clone has an .envrc).
   programs.direnv = {
