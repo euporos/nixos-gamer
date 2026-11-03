@@ -8,9 +8,13 @@
     # box at activation using its SSH host key). See sops.nix / .sops.yaml.
     sops-nix.url = "github:Mic92/sops-nix";
     sops-nix.inputs.nixpkgs.follows = "nixpkgs";
+
+    # Claude Code, same source as the laptop's nix-configs (claude-dev.nix).
+    claude-code-nix.url = "github:sadjow/claude-code-nix";
+    claude-code-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, sops-nix }:
+  outputs = { self, nixpkgs, sops-nix, claude-code-nix }:
     let
       localSystem = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${localSystem};
@@ -48,9 +52,11 @@
     {
       nixosConfigurations.nixos-gamer = nixpkgs.lib.nixosSystem {
         system = localSystem;
+        specialArgs = { inherit claude-code-nix; };
         modules = [
           ./hardware-configuration.nix
           ./configuration.nix
+          ./claude-dev.nix
           sops-nix.nixosModules.sops
         ];
       };
