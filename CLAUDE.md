@@ -99,6 +99,23 @@ from a machine without that alias needs it added first.
     GRUB writes its stub to the empty `/boot/efi` dir on the ext4 root instead
     of the real ESP, and the bootloader silently isn't updated.
 
+## Claude Code on the box (`claude-dev.nix`)
+
+The box doubles as a development machine for the 7kaa AI work
+(`~/dev/7kaa_epr`, branch `ai-ml`, see its `roadmap-ai-ml.md`). Claude Code
+comes from the same `claude-code-nix` flake input as the laptop's
+nix-configs; `~/.claude/{settings.json,CLAUDE.md,skills}` are tmpfiles
+symlinks into `/home/phylax/config` (a clone of `github:euporos/nix-configs`,
+the laptop's `~/config`). To pick up settings changes made on the laptop:
+`git -C ~/config pull`. The settings' Stop hook auto-commits in-place edits
+there, so push from the box too. **GitHub access on the box is agent
+forwarding only** (`ForwardAgent yes` in the laptop's ssh config, no key on
+the box): git pull/push works in an interactive ssh session, not from a
+detached tmux job started earlier without the agent. `~/.claude.json`
+(login, MCP servers) and plugins are per machine: run `claude` once and log
+in. direnv + nix-direnv are enabled system-wide, so `cd ~/dev/7kaa_epr`
+loads the game's devShell.
+
 ## Hangs and self-recovery (`resilience.nix`)
 
 **2026-10-08 the box hard-froze while idle** (GPU unloaded, nothing running):
