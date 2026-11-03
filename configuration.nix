@@ -208,6 +208,9 @@ in
   users.users.phylax = {
     isNormalUser = true;
     description = "Phylax";
+    # User units (overnight-* runs, overnight-resume.service) must outlive the
+    # login session and start at boot, not at first login.
+    linger = true;
     # "cdrom" is required to rip: /dev/sr0 is brw-rw---- root:cdrom, so without
     # it abcde/cdparanoia fail with permission denied as a non-root user.
     extraGroups = [ "networkmanager" "wheel" "cdrom" ];
