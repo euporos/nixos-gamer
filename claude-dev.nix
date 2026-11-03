@@ -45,6 +45,16 @@ in
     nix-direnv.enable = true;
   };
 
+  # The AI-run dashboard (ml/ml-dashboard.service in the 7kaa_epr repo, a
+  # static http.server on 8077 serving ~/ml-runs) is reachable from the LAN
+  # only, same pattern as comfyui.nix: no auth, so not allowedTCPPorts.
+  networking.firewall.extraCommands = ''
+    iptables -A nixos-fw -p tcp -s 192.168.85.0/24 --dport 8077 -j nixos-fw-accept
+  '';
+  networking.firewall.extraStopCommands = ''
+    iptables -D nixos-fw -p tcp -s 192.168.85.0/24 --dport 8077 -j nixos-fw-accept || true
+  '';
+
   # ~/.claude/{settings.json,CLAUDE.md,skills} -> the nix-configs checkout.
   # L+ replaces whatever Claude Code created there first; the links dangle
   # until /home/phylax/config is cloned.
