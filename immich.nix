@@ -54,6 +54,24 @@ in
     machine-learning.enable = true;
   };
 
+  # albumentations (an immich-machine-learning dependency) is built from source
+  # on this box, because the CUDA tweaks to the nixpkgs config change its
+  # dependencies' hashes, so there is no binary-cache hit. Its test suite then
+  # fails one numpy-compat test (test_gaussian_blur_matches_pil: "truth value
+  # of an array … is ambiguous", 1 of ~8800, 2026-11-12, nixpkgs 293d6ab).
+  # Skip only that test. Drop this once a nixpkgs bump builds it again.
+  nixpkgs.overlays = [
+    (final: prev: {
+      pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
+        (pyFinal: pyPrev: {
+          albumentations = pyPrev.albumentations.overridePythonAttrs (old: {
+            disabledTests = (old.disabledTests or [ ]) ++ [ "test_gaussian_blur_matches_pil" ];
+          });
+        })
+      ];
+    })
+  ];
+
   # Only the server reads the originals. The ML service gets preview images
   # from the server over HTTP and never touches the share.
   systemd.services.immich-server.serviceConfig = readOnlyPhotos;
