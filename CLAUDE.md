@@ -665,3 +665,12 @@ warm for whisper/ollama), and the spinning HDDs below.
   needs a reboot of the box; services like the CDI generator fail until then.
 - `hardware-configuration.nix` carries real disk UUIDs — regenerate on the box,
   never hand-edit.
+
+## Immich trial (`immich.nix`)
+
+Trial for the nas-migration project (try Immich before the new NAS box
+exists), port 2283, LAN only. Indexes two NAS photo dirs as read-only external
+libraries (read-only bind into `immich-server`; the CIFS mount itself stays
+rw for whisper). Users and libraries live in Immich's DB, not in Nix. ML runs
+on the CPU (no Pascal CUDA). The box is usually off, so scans/ML jobs only
+progress while it is up. Removal steps are in the module header.

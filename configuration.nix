@@ -80,6 +80,7 @@ in
     ./comfyui.nix
     ./resilience.nix
     ./sops.nix
+    ./immich.nix   # trial, nas-migration phase 1
   ];
 
   # --- Boot -----------------------------------------------------------------
