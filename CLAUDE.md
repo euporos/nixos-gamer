@@ -674,3 +674,10 @@ libraries (read-only bind into `immich-server`; the CIFS mount itself stays
 rw for whisper). Users and libraries live in Immich's DB, not in Nix. ML runs
 on the CPU (no Pascal CUDA). The box is usually off, so scans/ML jobs only
 progress while it is up. Removal steps are in the module header.
+
+Version: Immich comes from the pinned nixpkgs (`nixos-26.05` = **2.7.5**), so
+the web UI's "new version available" banner (v3.x) is expected; nothing
+auto-updates. Decided 2026-11-12 to stay on 2.x and get v3 (3.4.x, already on
+master) with the **26.11** bump. Don't overlay just the unstable package: v3
+also needs the unstable NixOS module (VectorChord extension setup/reindex).
+The trial DB is disposable; if the 2→3 migration fails, drop and re-create it.
