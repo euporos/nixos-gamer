@@ -1,6 +1,24 @@
 { config, pkgs, ... }:
 
 let
+  # CIFS mount of a NAS share with the laptop's options (see the storage section).
+  laptopStyleShare = share: {
+    device = "//192.168.85.50/${share}";
+    fsType = "cifs";
+    options = [
+      "nofail" "_netdev" "hard" "nohandlecache" "noauto"
+      "x-systemd.automount"
+      "x-systemd.idle-timeout=600"
+      "x-systemd.device-timeout=30s"
+      "x-systemd.mount-timeout=30s"
+      "credentials=${config.sops.secrets."smb-secrets".path}"
+      "uid=1000" "gid=100"
+      "cache=loose" "actimeo=60"
+      "nounix" "noserverino" "nodfs" "vers=3.0"
+      "nosharesock" "resilienthandles" "handletimeout=30000"
+    ];
+  };
+
   # abcde expands these itself at rip time, so the $-refs have to survive both
   # Nix and the shell that sources the config. Double-quoted Nix strings here
   # (plain \$ escape); single-quoted in the config below, inside a quoted
@@ -182,6 +200,16 @@ in
       "file_mode=0666"
     ];
   };
+
+  # The other two NAS shares, mounted exactly as on the laptop (same options,
+  # same paths) so that scripts written there run here unchanged, e.g. the
+  # family-video DVD encode reading /media/NAS/2/S2/DVDcopy. Same SMB account
+  # as Netspace, so they reuse the smb-secrets credentials. Boot-safe like the
+  # Netspace mount: noauto + x-systemd.automount + nofail keep the NAS off the
+  # boot path. `hard` is the laptop's choice: I/O blocks during a NAS outage
+  # instead of failing.
+  fileSystems."/media/NAS/2" = laptopStyleShare "NAS2";
+  fileSystems."/media/NAS/backup" = laptopStyleShare "NAS_backup";
 
   # --- Locale / time --------------------------------------------------------
   time.timeZone = "Europe/Berlin";
