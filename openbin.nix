@@ -101,7 +101,7 @@ in
       set -euo pipefail
       # Touching the path triggers the CIFS automount; fail loudly if the NAS
       # is away rather than writing into the empty mountpoint.
-      if ! ls ${lib.escapeShellArg backupDir}/.. >/dev/null 2>&1; then
+      if ! ls ${builtins.dirOf backupDir} >/dev/null 2>&1; then
         echo "NAS share not reachable, skipping"; exit 1
       fi
       mkdir -p ${backupDir}/db ${backupDir}/photos
