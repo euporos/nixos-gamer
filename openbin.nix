@@ -24,13 +24,15 @@ let
   uid = "1000";
   backupDir = "/media/NAS/Netspace/PHYLAX/Backup/openbin";
 
-  # Capture page (/capture) keeps shots only in browser memory until saved;
-  # an accidental pull-to-refresh while scrolling wipes them, and OpenBin has
+  # Injected UI fixes (index.html, see postStart below). 1) Capture page
+  # (/capture) keeps shots only in browser memory; an accidental
+  # pull-to-refresh while scrolling wipes them, and OpenBin has
   # no unsaved-changes guard. This script, injected into index.html, turns
   # off pull-to-refresh there (overscroll-behavior) and asks before
   # reload/close while blob: thumbnails are on screen. External file, not
   # inline: OpenBin's CSP pins its inline scripts by hash, 'self' is allowed.
   # beforeunload is ignored by iOS Safari; the overscroll part still works.
+  # 2) Camera option for "Add Photo" on phones (see the comment in the JS).
   captureGuard = pkgs.writeText "openbin-capture-guard.js" ''
     (function () {
       function onCapture() { return location.pathname.indexOf("/capture") === 0; }
@@ -45,6 +47,55 @@ let
       }
       sync();
       setInterval(sync, 500); // SPA route changes don't reload the page
+
+      // "Add Photo" is <input type=file accept=image multiple> without
+      // `capture`; Android then opens only the photo picker, no camera. OpenBin
+      // opens these inputs via ref.click(), so wrap click(): on touch devices
+      // offer Take photo (capture=environment -> camera app) / Gallery. The
+      // file still lands in OpenBin's own input, so its upload code runs.
+      var origClick = HTMLInputElement.prototype.click;
+      function isPhotoInput(el) {
+        return el.type === "file" && /image/.test(el.accept || "");
+      }
+      function coarse() { return matchMedia("(pointer: coarse)").matches; }
+      function chooser(input) {
+        var bg = document.createElement("div");
+        bg.style.cssText = "position:fixed;inset:0;z-index:2147483647;" +
+          "background:rgba(0,0,0,.45);display:flex;align-items:flex-end;justify-content:center";
+        var box = document.createElement("div");
+        box.style.cssText = "width:100%;max-width:480px;display:flex;flex-direction:column;gap:8px;" +
+          "padding:12px 12px calc(16px + env(safe-area-inset-bottom))";
+        function btn(label, primary, fn) {
+          var b = document.createElement("button");
+          b.type = "button";
+          b.textContent = label;
+          b.style.cssText = "font:600 17px system-ui,sans-serif;padding:16px;border:0;border-radius:14px;" +
+            (primary ? "background:#0a84ff;color:#fff" : "background:#f2f2f7;color:#000");
+          b.addEventListener("click", function (e) {
+            e.stopPropagation();
+            bg.remove();
+            if (fn) fn();
+          });
+          box.appendChild(b);
+        }
+        btn("Take photo", true, function () {
+          input.setAttribute("capture", "environment");
+          origClick.call(input);
+          setTimeout(function () { input.removeAttribute("capture"); }, 1000);
+        });
+        btn("Choose from gallery", false, function () {
+          input.removeAttribute("capture");
+          origClick.call(input);
+        });
+        btn("Cancel", false, null);
+        bg.addEventListener("click", function () { bg.remove(); });
+        bg.appendChild(box);
+        document.body.appendChild(bg);
+      }
+      HTMLInputElement.prototype.click = function () {
+        if (isPhotoInput(this) && coarse()) { chooser(this); return; }
+        return origClick.apply(this, arguments);
+      };
     })();
   '';
 in
