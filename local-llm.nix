@@ -245,6 +245,10 @@ let
                 messages.insert(0, {"role": "system", "content": GERMAN_RULE})
             else:
                 sys_msg["content"] = (sys_msg["content"] + "\n\n" + GERMAN_RULE).strip()
+            # Repeated at the very end: the 8B model follows recent text best.
+            last_user = next((m for m in reversed(messages) if m["role"] == "user"), None)
+            if last_user is not None:
+                last_user["content"] = (last_user["content"] + "\n\n" + GERMAN_RULE).strip()
         payload = {
             "model": req["model"],
             "messages": messages,
