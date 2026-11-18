@@ -23,6 +23,30 @@ let
   # host the files belong to phylax (uid 1000).
   uid = "1000";
   backupDir = "/media/NAS/Netspace/PHYLAX/Backup/openbin";
+
+  # Capture page (/capture) keeps shots only in browser memory until saved;
+  # an accidental pull-to-refresh while scrolling wipes them, and OpenBin has
+  # no unsaved-changes guard. This script, injected into index.html, turns
+  # off pull-to-refresh there (overscroll-behavior) and asks before
+  # reload/close while blob: thumbnails are on screen. External file, not
+  # inline: OpenBin's CSP pins its inline scripts by hash, 'self' is allowed.
+  # beforeunload is ignored by iOS Safari; the overscroll part still works.
+  captureGuard = pkgs.writeText "openbin-capture-guard.js" ''
+    (function () {
+      function onCapture() { return location.pathname.indexOf("/capture") === 0; }
+      function unsaved() { return onCapture() && !!document.querySelector('img[src^="blob:"]'); }
+      addEventListener("beforeunload", function (e) {
+        if (unsaved()) { e.preventDefault(); e.returnValue = ""; }
+      });
+      function sync() {
+        var v = onCapture() ? "contain" : "";
+        document.documentElement.style.overscrollBehaviorY = v;
+        if (document.body) document.body.style.overscrollBehaviorY = v;
+      }
+      sync();
+      setInterval(sync, 500); // SPA route changes don't reload the page
+    })();
+  '';
 in
 {
   virtualisation.oci-containers.backend = "podman";
@@ -31,7 +55,10 @@ in
     # Host network: reaches the proxy on 127.0.0.1:11435, and podman's -p
     # port publishing would DNAT past the LAN-only firewall rule (comfyui.nix).
     extraOptions = [ "--network=host" ];
-    volumes = [ "${dataDir}:/data" ];
+    volumes = [
+      "${dataDir}:/data"
+      "${captureGuard}:/app/public/openbin-capture-guard.js:ro"
+    ];
     environment = {
       PORT = toString port;
       DATABASE_PATH = "/data/openbin.db";
@@ -68,6 +95,21 @@ in
       TRUST_PROXY = "false";
     };
   };
+
+  # Hook the guard into index.html. The container is recreated on every
+  # start (--rm), so patch each time; idempotent. If a new OpenBin release
+  # drops `</head>` from index.html the grep check fails the unit loudly.
+  systemd.services.podman-openbin.postStart = ''
+    for i in $(seq 1 30); do
+      ${pkgs.podman}/bin/podman exec openbin true 2>/dev/null && break
+      sleep 1
+    done
+    ${pkgs.podman}/bin/podman exec -u 0 openbin sh -c '
+      f=/app/public/index.html
+      grep -q openbin-capture-guard "$f" ||
+        sed -i "s|</head>|<script src=\"/openbin-capture-guard.js\"></script></head>|" "$f"
+      grep -q openbin-capture-guard "$f"'
+  '';
 
   systemd.tmpfiles.rules = [
     "d ${dataDir} 0750 ${uid} 100 -"
