@@ -691,7 +691,9 @@ in
     package = pkgs.ollama-cuda;   # explicit, so no global cudaSupport is needed
     host = "127.0.0.1";
     port = 11434;
-    loadModels = [ "qwen3:14b" ]; # pulled by a separate oneshot after start
+    # Pulled by a separate oneshot after start. qwen3-vl: OpenBin photo
+    # analysis via local-llm.nix (the -instruct tag has no thinking mode).
+    loadModels = [ "qwen3:14b" "qwen3-vl:8b-instruct" ];
     environmentVariables = {
       # Unload models promptly — the 11 GB card is shared with whisper. The
       # summarize worker overrides this per-call ("keep_alive") to keep the model

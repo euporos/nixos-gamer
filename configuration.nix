@@ -95,6 +95,7 @@ in
     ./whisper.nix
     ./summarize.nix
     ./local-llm.nix
+    ./openbin.nix
     ./comfyui.nix
     ./resilience.nix
     ./sops.nix
