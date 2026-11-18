@@ -68,7 +68,8 @@ let
         "hardware store would use: \"Lack\" not \"Lacquer\", \"Wandfarbe\" not "
         "\"Wall Paint\", \"Holzlasur\", \"Spachtelmasse\", \"Schrauben\", "
         "\"Akkuschrauber\". Follow German capitalization instead of English "
-        "Title Case. Keep brand and product names exactly as printed on the "
+        "Title Case, but always start a name with a capital letter (\"Weißer "
+        "Seidenmattlack\"). Keep brand and product names exactly as printed on the "
         "label. JSON keys, action types and other field names stay exactly as "
         "specified (English)."
     )
