@@ -56,8 +56,10 @@ in
       AI_ENDPOINT_URL = "http://127.0.0.1:11435/v1";
       AI_MODEL = "qwen3-vl:8b-instruct";
       AI_API_KEY = "local";
-      # 5 photos/request (default) x ~1k tokens fits the proxy's 16k num_ctx.
-      AI_MAX_PHOTOS_PER_REQUEST = "5";
+      # One photo per shelf row (paint cans). Measured ~0.5-0.85k tokens per
+      # 1024 px photo + ~1.3k base prompt: 20 photos ~ 18-24k, fits the
+      # proxy's 32k LLM_PROXY_VISION_NUM_CTX (local-llm.nix) — raise together.
+      AI_MAX_PHOTOS_PER_REQUEST = "20";
 
       # Plain HTTP over LAN/WireGuard, no reverse proxy. Do NOT set
       # TRUST_PROXY=true (or NODE_ENV=production): either makes the session

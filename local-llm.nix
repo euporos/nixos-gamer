@@ -414,9 +414,10 @@ in
       # Passed through with images (OpenBin). Must be pulled: summarize.nix
       # loadModels. The -instruct tag has no thinking mode at all.
       LLM_PROXY_VISION_MODELS = "qwen3-vl:8b-instruct";
-      # OpenBin sends up to AI_MAX_PHOTOS_PER_REQUEST (5) photos at 1024 px,
-      # ~1k tokens each, plus a context prompt of up to ~6k tokens.
-      LLM_PROXY_VISION_NUM_CTX = "16384";
+      # OpenBin sends up to AI_MAX_PHOTOS_PER_REQUEST (20, openbin.nix) photos
+      # at 1024 px, ~0.5-0.85k tokens each, plus a ~1.3k+ prompt. 32k on the
+      # 11 GB 1080 Ti: ~10.3 GB (7.9 GB measured at 16k + ~2.4 GB KV cache).
+      LLM_PROXY_VISION_NUM_CTX = "32768";
       GPU_LOCK = "/run/whisper-gpu.lock";
     };
     serviceConfig = {
