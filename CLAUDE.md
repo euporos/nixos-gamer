@@ -636,6 +636,25 @@ first and falls back to OpenAI when the box is off **or busy**.
   waits up to one window.
 - The request's `model` is ignored (always `qwen3:14b`); `num_ctx` 8192 (enough
   for tchecker's 10k-char cap in + out). Logs: `journalctl -u llm-proxy`.
+  **Exception:** models listed in `LLM_PROXY_VISION_MODELS` take the vision path.
+- **Vision path** (client: OpenBin, `openbin.nix`, talks to 127.0.0.1:11435
+  directly — nginx's 1 MB cap keeps photos off the LAN route): full OpenAI chat
+  completions incl. SSE streaming, translated to Ollama's **native** `/api/chat`
+  with `think: false`, `num_ctx` 16384, our `keep_alive`, `response_format` →
+  `format`. Why not Ollama's own `/v1` (verified, Ollama 0.30.6): it rejects
+  WebP images (llama.cpp loader) — so the proxy transcodes WebP → JPEG with
+  Pillow — and it ignores `keep_alive` (with `OLLAMA_KEEP_ALIVE=0` every photo
+  would reload the model), `num_ctx` and `think`.
+  The proxy tracks the loaded model and unloads it before switching between
+  qwen3:14b (9.3 GB) and qwen3-vl:8b-instruct (~8 GB at 16k ctx) — both don't fit.
+  Single-threaded: a running stream blocks other clients until it finishes.
+
+## OpenBin inventory (`openbin.nix`)
+
+Docs: `~/ARBEITSSD/projects/ordnung` (README + CLAUDE.md). Podman container,
+host network, port 1453 LAN-only, data `/var/lib/openbin` (uid 1000 = the
+image's `node` user = phylax), nightly `openbin-backup` (as phylax, so sqlite3
+never leaves root-owned `-wal/-shm` files) to the NAS PHYLAX share.
 
 ## Electricity / idle power (`disk-spindown.nix`)
 
