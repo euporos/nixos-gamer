@@ -59,8 +59,11 @@ in
       # 5 photos/request (default) x ~1k tokens fits the proxy's 16k num_ctx.
       AI_MAX_PHOTOS_PER_REQUEST = "5";
 
-      # Plain-HTTP behind nginx (TLS) — see README "HTTPS".
-      TRUST_PROXY = "true";
+      # Plain HTTP over LAN/WireGuard, no reverse proxy. Do NOT set
+      # TRUST_PROXY=true (or NODE_ENV=production): either makes the session
+      # cookies `Secure`, and login over http://192.168.85.30 then silently
+      # fails (401 after sign-in). Set it only once a TLS proxy is in front.
+      TRUST_PROXY = "false";
     };
   };
 
