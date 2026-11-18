@@ -56,6 +56,22 @@ let
     NUM_CTX   = int(os.environ.get("LLM_PROXY_NUM_CTX", "8192"))
     VISION_MODELS  = set(os.environ.get("LLM_PROXY_VISION_MODELS", "").split())
     VISION_NUM_CTX = int(os.environ.get("LLM_PROXY_VISION_NUM_CTX", "16384"))
+    # OpenBin's prompts are hard-coded English and its per-user custom prompt
+    # only covers the first analysis (not reanalysis/correction/commands), so
+    # the German rule is appended here to the system prompt of every request
+    # for a vision model (= every OpenBin request).
+    VISION_GERMAN = os.environ.get("LLM_PROXY_VISION_GERMAN", "") == "1"
+    GERMAN_RULE = (
+        "LANGUAGE RULE (overrides any English examples above): write every "
+        "human-readable value in German - bin names, item names, tags, notes, "
+        "interpretations and answers. Use the everyday German term a German "
+        "hardware store would use: \"Lack\" not \"Lacquer\", \"Wandfarbe\" not "
+        "\"Wall Paint\", \"Holzlasur\", \"Spachtelmasse\", \"Schrauben\", "
+        "\"Akkuschrauber\". Follow German capitalization instead of English "
+        "Title Case. Keep brand and product names exactly as printed on the "
+        "label. JSON keys, action types and other field names stay exactly as "
+        "specified (English)."
+    )
     # Ollama's own keep_alive outlives our window, so normally WE unload; it is
     # only the safety net if this process dies without running its cleanup.
     KEEP_ALIVE = str(IDLE_SECS + 120) + "s"
@@ -221,9 +237,16 @@ let
             options["seed"] = int(req["seed"])
         if req.get("stop"):
             options["stop"] = req["stop"] if isinstance(req["stop"], list) else [req["stop"]]
+        messages = to_ollama_messages(req.get("messages"), st)
+        if VISION_GERMAN:
+            sys_msg = next((m for m in messages if m["role"] == "system"), None)
+            if sys_msg is None:
+                messages.insert(0, {"role": "system", "content": GERMAN_RULE})
+            else:
+                sys_msg["content"] = (sys_msg["content"] + "\n\n" + GERMAN_RULE).strip()
         payload = {
             "model": req["model"],
-            "messages": to_ollama_messages(req.get("messages"), st),
+            "messages": messages,
             "stream": bool(req.get("stream")),
             "think": False,
             "keep_alive": KEEP_ALIVE,
@@ -418,6 +441,8 @@ in
       # at 1024 px, ~0.5-0.85k tokens each, plus a ~1.3k+ prompt. 32k on the
       # 11 GB 1080 Ti: ~10.3 GB (7.9 GB measured at 16k + ~2.4 GB KV cache).
       LLM_PROXY_VISION_NUM_CTX = "32768";
+      # Item/bin names in German ("Lack", not "Lacquer"); see GERMAN_RULE.
+      LLM_PROXY_VISION_GERMAN = "1";
       GPU_LOCK = "/run/whisper-gpu.lock";
     };
     serviceConfig = {
